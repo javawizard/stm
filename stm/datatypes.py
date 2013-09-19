@@ -5,7 +5,7 @@ This module provides several transactional data types built on top of the
 primitives provided by the STM module.
 """
 
-import .ttftree
+from . import ttftree
 from collections import MutableSequence, MutableMapping, MutableSet
 import stm
 from stm.timeout import Timeout
