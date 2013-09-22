@@ -1,4 +1,4 @@
-from distutils.core import setup
+from setuptools import setup
 from subprocess import Popen, PIPE
 from time import gmtime, strftime
 
@@ -10,5 +10,6 @@ setup(
     description="A software transactional memory library",
     author="Alexander Boyd",
     author_email="alex@opengroove.org",
-    packages=["stm"]
+    packages=["stm"],
+    install_requires=["ttftree"]
 )
