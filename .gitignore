@@ -1,0 +1,7 @@
+/dist
+/stm.egg-info
+/MANIFEST
+**/*.pyc
+.project
+.pydevproject
+
