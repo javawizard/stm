@@ -1,5 +1,5 @@
 /dist
-/stm.egg-info
+/*.egg-info
 /MANIFEST
 **/*.pyc
 .project
