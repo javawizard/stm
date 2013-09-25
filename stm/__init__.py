@@ -506,6 +506,10 @@ class TWeakRef(object):
             # return our value.
             return self._ref
     
+    value = property(get, doc="""A property wrapper around self.get.
+    
+    Note that this is a read-only property.""")
+    
     def __call__(self):
         """
         An alias for self.get() provided for API compatibility with Python's
