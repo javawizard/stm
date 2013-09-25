@@ -449,7 +449,7 @@ class TWeakRef(object):
     
     TWeakRefs are fully compatible with the retry() function; that is, a
     function such as the following works as expected, and blocks until the
-    TWeakRef's referent is garbage collected:
+    TWeakRef's referent has been garbage collected:
     
     def block_until_garbage_collected(some_weak_ref):
         if some_weak_ref.get() is not None:
