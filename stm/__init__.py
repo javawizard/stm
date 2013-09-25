@@ -661,8 +661,8 @@ def retry(resume_after=None, resume_at=None):
     indicates a wall clock time (a la time.time()) at which to time out.
     
     Timeouts are highly experimental and a feature shared with only one other
-    STM that I know of (scala-stm), so I'd greatly appreciate feedback on this
-    feature.
+    STM system that I know of (scala-stm), so I'd greatly appreciate feedback
+    on this feature.
     """
     # Make sure we're in a transaction
     _stm_state.get_current()
