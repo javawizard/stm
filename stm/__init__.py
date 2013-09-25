@@ -10,7 +10,7 @@ class. Those form the core building blocks of the STM system.
 """
 
 from threading import local as _Local, Lock as _Lock, Thread as _Thread
-from Queue import Queue, Full, Empty
+from threading import Event as _Event
 import weakref as weakref_module
 from contextlib import contextmanager
 import time
@@ -93,7 +93,7 @@ class _Timer(_Thread):
         (in terms of time.time()) at which the timer should go off rather than
         the number of seconds after which they should resume.
         
-        This class accepts a retry queue to notify instead of a function to
+        This class accepts a retry event to notify instead of a function to
         call, mainly to avoid one layer of unnecessary indirection.
     
     The whole reason we're busywaiting here is because Python [versions earlier
@@ -104,11 +104,11 @@ class _Timer(_Thread):
     proper blocking timeout on all platforms except Windows (and hey, who
     cares about Windows anyway?).
     """
-    def __init__(self, queue, resume_at):
+    def __init__(self, event, resume_at):
         _Thread.__init__(self, name="Timeout thread expiring at %s" % resume_at)
-        self.queue = queue
+        self.event = event
         self.resume_at = resume_at
-        self.cancel_queue = Queue(1)
+        self.cancel_event = _Event()
     
     def start(self):
         # Only start the thread if we've been given a non-None timeout
@@ -120,29 +120,19 @@ class _Timer(_Thread):
     def run(self):
         while True:
             # Check to see if we've been asked to cancel
-            try:
-                self.cancel_queue.get(block=False)
+            if self.cancel_event.is_set():
                 # We got a cancel request, so return.
                 return
-            except Empty:
-                # No cancel request, so proceed
-                pass
             time_to_sleep = min(0.5, self.resume_at - time.time())
             if time_to_sleep <= 0:
-                # Timeout's up! Notify the queue, then return.
-                try:
-                    self.queue.put(None)
-                except Full:
-                    pass
+                # Timeout's up! Notify the event, then return.
+                self.event.set()
                 return
             # Timeout's not up. Sleep for the specified amount of time.
             time.sleep(time_to_sleep)
     
     def cancel(self):
-        try:
-            self.cancel_queue.put(None)
-        except Full:
-            pass
+        self.cancel_event.set()
 
 
 class _Transaction(object):
@@ -277,7 +267,7 @@ class _BaseTransaction(_Transaction):
             modified = _last_transaction
             # Then we update the real values of all of the TVars. Note that
             # TVar._update_real_value takes care of notifying the TVar's
-            # queues for us.
+            # events for us.
             for var, value in self.vars.iteritems():
                 var._update_real_value(value, modified)
             # And then we tell all TWeakRefs created during this
@@ -293,27 +283,27 @@ class _BaseTransaction(_Transaction):
         with _global_lock:
             for item in self.check_values:
                 item._check_clean()
-            # Nope, none of them have changed. So now we create a queue,
+            # Nope, none of them have changed. So now we create an event,
             # then add it to all of the vars we need to watch.
-            q = Queue(1)
+            e = _Event()
             for item in self.retry_values:
-                item._add_retry_queue(q)
+                item._add_retry_event(e)
         # Then we create a timer to let us know when our retry timeout (if any
         # calls made during this transaction indicated one) is up. Note that
         # _Timer does nothing when given a resume time of None, so we don't
         # need to worry about that here.
-        timer = _Timer(q, self.resume_at)
+        timer = _Timer(e, self.resume_at)
         timer.start()
         # Then we wait.
-        q.get()
+        e.wait()
         # One of the vars was modified or our timeout expired. Now we go cancel
         # the timer (in case it was a change to one of our watched vars that
         # woke us up instead of a timeout) and remove ourselves from the vars'
-        # queues.
+        # events.
         timer.cancel()
         with _global_lock:
             for item in self.retry_values:
-                item._remove_retry_queue(q)
+                item._remove_retry_event(e)
         # And then we retry immediately.
         raise _RetryImmediately
     
@@ -375,13 +365,13 @@ class TVar(object):
     More complex datatypes (such as TList, TDict, and TObject) are available in
     the tlist, tdict, and tobject modules, respectively.
     """
-    __slots__ = ["_queues", "_real_value", "_modified", "__weakref__"]
+    __slots__ = ["_events", "_real_value", "_modified", "__weakref__"]
     
     def __init__(self, value=None):
         """
         Creates a TVar with the specified initial value.
         """
-        self._queues = set()
+        self._events = set()
         self._real_value = value
         self._modified = 0
     
@@ -413,23 +403,20 @@ class TVar(object):
         if self._modified > _stm_state.get_base().start:
             raise _RetryImmediately
     
-    def _add_retry_queue(self, q):
-        self._queues.add(q)
+    def _add_retry_event(self, e):
+        self._events.add(e)
     
-    def _remove_retry_queue(self, q):
-        self._queues.remove(q)
+    def _remove_retry_event(self, e):
+        self._events.remove(e)
     
     def _update_real_value(self, value, modified):
         # NOTE: This is always called while the global lock is acquired
         # Update our real value and modified transaction
         self._real_value = value
         self._modified = modified
-        # Then notify all of the queues registered to us.
-        for q in self._queues:
-            try:
-                q.put(None, False)
-            except Full:
-                pass 
+        # Then notify all of the events registered to us.
+        for e in self._events:
+            e.set()
 
 
 class TWeakRef(object):
@@ -456,10 +443,9 @@ class TWeakRef(object):
             retry()
     """
     def __init__(self, value, callback=None):
-        self._queues = set()
+        self._events = set()
         self._mature = False
         self._ref = value
-        self._queues = set()
         # Use the TVar hack we previously mentioned in the docstring for
         # ensuring that the callback is only run if we commit. TODO: Double
         # check to make sure this is even necessary, as now that I think about
@@ -552,24 +538,21 @@ class TWeakRef(object):
         Function passed to the underlying weakref.ref object to be called when
         it's collected. It spawns a thread (to avoid locking up whatever thread
         garbage collection is happening on) that notifies all of this
-        TWeakRef's retry queues and then runs self._callback in a transaction.
+        TWeakRef's retry events and then runs self._callback in a transaction.
         """
         def run():
             with _global_lock:
-                for q in self._queues:
-                    try:
-                        q.put(None, False)
-                    except Full:
-                        pass
+                for e in self._events:
+                    e.set()
             if self._callback is not None:
                 atomically(self._callback)
         _Thread(name="%r dead value notifier" % self, target=run).start()
     
-    def _add_retry_queue(self, q):
-        self._queues.add(q)
+    def _add_retry_event(self, e):
+        self._events.add(e)
     
-    def _remove_retry_queue(self, q):
-        self._queues.remove(q)
+    def _remove_retry_event(self, e):
+        self._events.remove(e)
 
 
 def atomically(function):
