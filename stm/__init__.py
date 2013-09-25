@@ -439,7 +439,7 @@ class TWeakRef(object):
     remains the same over the course of a given transaction. More specifically,
     if a TWeakRef's referent is garbage collected in the middle of a
     transaction that previously read the reference as alive, the transaction
-    will be immediately aborted and restared from the top.
+    will be immediately aborted and restarted from the top.
     
     A callback function can be specified when creating a TWeakRef; this
     function will be called in its own transaction when the value referred to
