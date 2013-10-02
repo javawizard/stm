@@ -7,5 +7,5 @@ setup(
     author="Alexander Boyd",
     author_email="alex@opengroove.org",
     packages=["stm"],
-    install_requires=["ttftree"]
+    install_requires=["ttftree", "six"]
 )
