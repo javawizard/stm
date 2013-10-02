@@ -177,8 +177,8 @@ class TList(MutableSequence):
     __repr__ = __str__
 
 
-_DictAnnotation = _namedtuple("stm.datatypes._DictAnnotation", ["index", "key"])
-_DictEntry = _namedtuple("stm.datatypes._DictEntry", ["key", "value"])
+_DictAnnotation = _namedtuple("_DictAnnotation", ["index", "key"])
+_DictEntry = _namedtuple("_DictEntry", ["key", "value"])
 _DICT_KEY_MEASURE = ttftree.TranslateMeasure(lambda entry: entry.key, ttftree.MeasureLastItem())
 _DICT_MEASURE = ttftree.CompoundMeasure(ttftree.MeasureItemCount(), _DICT_KEY_MEASURE, tuple_class=_DictAnnotation)
 
