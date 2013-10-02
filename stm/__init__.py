@@ -268,7 +268,7 @@ class _BaseTransaction(_Transaction):
             # Then we update the real values of all of the TVars. Note that
             # TVar._update_real_value takes care of notifying the TVar's
             # events for us.
-            for var, value in self.vars.iteritems():
+            for var, value in self.vars.items():
                 var._update_real_value(value, modified)
             # And then we tell all TWeakRefs created during this
             # transaction to mature
@@ -348,7 +348,7 @@ class _NestedTransaction(_Transaction):
         return result
     
     def commit(self):
-        for var, value in self.vars.iteritems():
+        for var, value in self.vars.items():
             self.parent.set_value(var, value)
     
     def make_previously(self):
