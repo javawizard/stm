@@ -7,6 +7,7 @@ primitives provided by the STM module.
 
 import ttftree
 from collections import MutableSequence, MutableMapping, MutableSet
+from collections import namedtuple as _namedtuple
 import stm
 from stm.timeout import Timeout
 
@@ -176,6 +177,12 @@ class TList(MutableSequence):
     __repr__ = __str__
 
 
+_DictAnnotation = _namedtuple("stm.datatypes._DictAnnotation", ["index", "key"])
+_DictEntry = _namedtuple("stm.datatypes._DictEntry", ["key", "value"])
+_DICT_KEY_MEASURE = ttftree.TranslateMeasure(lambda entry: entry.key, ttftree.MeasureLastItem())
+_DICT_MEASURE = ttftree.CompoundMeasure(ttftree.MeasureItemCount(), _DICT_KEY_MEASURE, tuple_class=_DictAnnotation)
+
+
 class TDict(MutableMapping):
     """
     UPDATE: This now uses 2-3 finger trees. Update accordingly.
@@ -198,7 +205,7 @@ class TDict(MutableMapping):
     wrap themselves in a call to stm.atomically() internally. 
     """
     def __init__(self, initial_values=None):
-        self.var = stm.TVar(ttftree.Empty(ttftree.CompoundMeasure(ttftree.MeasureItemCount(), ttftree.TranslateMeasure(lambda pair: pair[0], ttftree.MeasureLastItem()))))
+        self.var = stm.TVar(ttftree.Empty(_DICT_MEASURE))
         if initial_values:
             # Optimize to O(1) if we're cloning another TDict
             if isinstance(initial_values, TDict):
@@ -213,30 +220,29 @@ class TDict(MutableMapping):
                     self[k] = v
     
     def __getitem__(self, key):
-        left, right = self.var.get().partition(lambda a: a[1] >= key)
-        if right.is_empty or right.get_first()[0] != key:
+        left, right = self.var.get().partition(lambda a: a.key >= key)
+        if right.is_empty or right.get_first().key != key:
             raise KeyError(key)
-        return right.get_first()[1]
+        return right.get_first().value
     
     def __setitem__(self, key, value):
-        left, right = self.var.get().partition(lambda a: a[1] >= key)
-        if not right.is_empty and right.get_first()[0] == key:
+        left, right = self.var.get().partition(lambda a: a.key >= key)
+        if not right.is_empty and right.get_first().key == key:
             right = right.without_first()
-        self.var.set(left.add_last((key, value)).append(right))
+        self.var.set(left.add_last(_DictEntry(key, value)).append(right))
     
     def __delitem__(self, key):
-        left, right = self.var.get().partition(lambda a: a[1] >= key)
-        if right.is_empty or right.get_first()[0] != key:
+        left, right = self.var.get().partition(lambda a: a.key >= key)
+        if right.is_empty or right.get_first().key != key:
             raise KeyError(key)
         self.var.set(left.append(right.without_first()))
     
     def __iter__(self):
-        for k, _ in ttftree.value_iterator(self.var.get()):
-            yield k
+        for entry in ttftree.value_iterator(self.var.get()):
+            yield entry.key
     
     def __len__(self):
-        length, _ = self.var.get().annotation
-        return length
+        self.var.get().annotation.index
     
     def iterkeys(self):
         return iter(self)
@@ -245,8 +251,8 @@ class TDict(MutableMapping):
         return list(self.iterkeys())
     
     def itervalues(self):
-        for _, v in ttftree.value_iterator(self.var.get()):
-            yield v
+        for entry in ttftree.value_iterator(self.var.get()):
+            yield entry.value
     
     def values(self):
         return list(self.itervalues())
