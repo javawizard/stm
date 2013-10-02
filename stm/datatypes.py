@@ -198,7 +198,7 @@ class TDict(MutableMapping):
     wrap themselves in a call to stm.atomically() internally. 
     """
     def __init__(self, initial_values=None):
-        self.var = stm.TVar(ttftree.Empty(ttftree.CompoundMeasure(ttftree.MeasureItemCount(), ttftree.TranslateMeasure(lambda (k, v): k, ttftree.MeasureLastItem()))))
+        self.var = stm.TVar(ttftree.Empty(ttftree.CompoundMeasure(ttftree.MeasureItemCount(), ttftree.TranslateMeasure(lambda pair: pair[0], ttftree.MeasureLastItem()))))
         if initial_values:
             # Optimize to O(1) if we're cloning another TDict
             if isinstance(initial_values, TDict):
@@ -213,19 +213,19 @@ class TDict(MutableMapping):
                     self[k] = v
     
     def __getitem__(self, key):
-        left, right = self.var.get().partition(lambda (i, k): k >= key)
+        left, right = self.var.get().partition(lambda a: a[1] >= key)
         if right.is_empty or right.get_first()[0] != key:
             raise KeyError(key)
         return right.get_first()[1]
     
     def __setitem__(self, key, value):
-        left, right = self.var.get().partition(lambda (i, k): k >= key)
+        left, right = self.var.get().partition(lambda a: a[1] >= key)
         if not right.is_empty and right.get_first()[0] == key:
             right = right.without_first()
         self.var.set(left.add_last((key, value)).append(right))
     
     def __delitem__(self, key):
-        left, right = self.var.get().partition(lambda (i, k): k >= key)
+        left, right = self.var.get().partition(lambda a: a[1] >= key)
         if right.is_empty or right.get_first()[0] != key:
             raise KeyError(key)
         self.var.set(left.append(right.without_first()))
