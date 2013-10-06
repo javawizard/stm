@@ -739,6 +739,8 @@ def previously(function, toplevel=False):
         if isinstance(transaction, _BaseTransaction):
             current.check_values.update(transaction.check_values)
             current.retry_values.update(transaction.retry_values)
+            if transaction.resume_at is not None:
+                current.update_resume_at(transaction.resume_at)
         # If it's a nested transaction, it will have already modified our base
         # by virtue of using our base as its parent, so we don't need to do
         # anything else.
