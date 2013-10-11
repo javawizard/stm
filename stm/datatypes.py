@@ -374,9 +374,9 @@ class BroadcastQueue(TObject):
     
     def new_endpoint(self):
         """
-        Creates a new endpoint that receives values added to this queue. The
-        endpoint initially starts out empty; items will appear on it as soon as
-        put() is called next.
+        Creates a new BroadcastEndpoint that receives values added to this
+        queue. The endpoint initially starts out empty; items will appear on it
+        as soon as put() is called next.
         """
         return BroadcastEndpoint(self._var)
 
