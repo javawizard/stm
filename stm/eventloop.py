@@ -1,12 +1,12 @@
 
-from stm import broadcastqueue
+from stm.datatypes import BroadcastQueue
 import stm
 from threading import Thread
 import traceback
 
 class EventLoop(object):
     def __init__(self):
-        self._queue = broadcastqueue.BroadcastQueue()
+        self._queue = BroadcastQueue()
         self._endpoint = self._queue.new_endpoint()
     
     def schedule(self, function):
