@@ -335,7 +335,8 @@ _BroadcastItem = _namedtuple("_BroadcastItem", ["value", "next"])
 
 class BroadcastQueue(TObject):
     """
-    A queue that can have multiple endpoints from which items can be consumed.
+    A single-producer, multiple-consumer queue that can have multiple endpoints
+    from which items can be consumed.
     
     Endpoints are created by calling new_endpoint(). Each endpoint initially
     starts out empty; items become available as soon as the creating queue's
@@ -356,6 +357,9 @@ class BroadcastQueue(TObject):
     a no-op.
     """
     def __init__(self):
+        """
+        Creates a new, empty broadcast queue.
+        """
         TObject.__init__(self)
         self._var = stm.TVar(None)
     
@@ -381,9 +385,9 @@ class BroadcastEndpoint(TObject):
     """
     A broadcast endpoint from which items can be read.
     
-    Normally, you won't need to create instances of this class yourself;
-    they're typically obtained by calling new_endpoint on a BroadcastQueue
-    instance.
+    This class should not be directly instantiated; instead, a BroadcastQueue
+    instance's new_endpoint() method should be called to obtain an endpoint
+    that reads from the queue in question.
     """
     def __init__(self, var):
         TObject.__init__(self)
@@ -409,6 +413,46 @@ class BroadcastEndpoint(TObject):
             item = self._var.get()
             self._var = item.next
             return item.value
+    
+    def replace(self, value):
+        """
+        Pushes the specified value back onto this endpoint, such that the next
+        call to get() will return the specified value.
+        
+        This is used internally to implement peek() and is_empty: an item is
+        retrieved from the endpoint and then immediately pushed back onto the
+        endpoint with replace(), thus leaving the endpoint unmodified. It can
+        also be used externally as needed.
+        
+        This can be called multiple times to push multiple items onto an
+        endpoint in LIFO order.
+        """
+        item = _BroadcastItem(value, self._var)
+        self._var = stm.TVar(item)
+    
+    def peek(self, block=False, timeout=None):
+        """
+        Returns the next available item from this endpoint without removing it.
+        
+        The block and timeout parameters have the same effect as they do when
+        passed to self.get(), but block defaults to False (which seems to be
+        the more common use case when calling peek()).
+        """
+        value = self.get(block, timeout)
+        self.replace(value)
+        return next
+    
+    @property
+    def is_empty(self):
+        """
+        True if this endpoint has no items available (i.e. a call to get()
+        would retry), False otherwise.
+        """
+        try:
+            self.peek()
+            return False
+        except Empty:
+            return True
     
     def duplicate(self):
         """
