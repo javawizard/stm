@@ -330,17 +330,7 @@ class TSet(MutableSet):
         self._var.set(new_set)
 
 
-class _BroadcastItem(object):
-    """
-    An item that has been added to the queue. Items themselves are immutable,
-    but they contain a TVar pointing to the next item added to the queue, or
-    None if a "next item" hasn't been added yet.
-    """
-    __slots__ = ["value", "next"]
-    
-    def __init__(self, value):
-        self.value = value
-        self.next = stm.TVar()
+_BroadcastItem = _namedtuple("_BroadcastItem", ["value", "next"])
 
 
 class BroadcastQueue(TObject):
@@ -374,7 +364,7 @@ class BroadcastQueue(TObject):
         Inserts an item into this queue. The item will then become available on
         all endpoints created from it.
         """
-        item = _BroadcastItem(value)
+        item = _BroadcastItem(value, stm.TVar())
         self._var.set(item)
         self._var = item.next
     
