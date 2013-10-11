@@ -409,6 +409,22 @@ class BroadcastEndpoint(TObject):
             item = self._var.get()
             self._var = item.next
             return item.value
+    
+    def duplicate(self):
+        """
+        Creates and returns a new endpoint containing exactly the same items as
+        this endpoint. Items inserted into the BroadcastQueue from which this
+        endpoint was created will be available on both this and the newly
+        created endpoint.
+        """
+        return BroadcastEndpoint(self._var)
+    
+    def __copy__(self):
+        """
+        An alias for self.duplicate that allows shallow copying of endpoints
+        with Python's copy module.
+        """
+        return self.duplicate()
 
 
 
