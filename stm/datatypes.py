@@ -440,7 +440,7 @@ class BroadcastEndpoint(TObject):
         """
         value = self.get(block, timeout)
         self.replace(value)
-        return next
+        return value
     
     @property
     def is_empty(self):
