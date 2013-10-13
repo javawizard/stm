@@ -74,6 +74,63 @@ Hm, I'm too tired to think this through. I'll revisit tomorrow.
 
 
 
+K so, let's make a first attempt at invariant support that won't be the most efficient but won't make things that don't use invariants perform any worse (other than the slight overhead involved in checking variables to see if they have anything to do with invariants and such).
+
+So, Invariants are named tuples providing two fields: function and accessed.
+
+So, we're worrying only about base transactions right now.
+
+Each variable has a dictionary mapping invariant functions that accessed it (perhaps wrapped in a key that hashes them based on their id) to tuples of variables that the invariant accessed. 
+
+When we start a transaction, we don't do anything for now.
+
+Transactions now have a proposed_invariants field, which is a set of either Invariants or functions, I haven't decided which yet.
+
+When an invariant is proposed, it is run, and the invariant added to the transaction's proposed_invariants.
+
+When a variable is accessed, the variable is added to the check list as usual. Then its list of invariant functions is retrieved and added to a list of invariants that have been threatened.
+
+When a transaction is to be committed, lots of things happen...
+
+Actually, what if we have invariants be their own first-class transactional "things", as it were, complete with modification times (expressed in terms of the global version clock) and mutable sets of data dependencies?
+
+The idea being that a transaction which accessed a TVar and thus caused a single invariant to run would increment the modification times of both the TVar and the invariant, or more specifically, an invariant's modification time would be incremented whenever the invariant's dependency set (the variables it accessed during its last run) is modified.
+
+(If memory serves, this is along the lines of what GHC's STM implementation does.)
+
+So then, let's see...
+
+When a variable is read, it's checked for modification and then added to the read set. Then its list of invariants is accessed and each of those added to a threatened invariant set. (I don't think we need to check their modification times right now as such checks will happen at the end of the transaction, but I need to make sure that's the case.)
+
+When an invariant is proposed, the invariant is run to make sure that it passes right now (I'm debating whether this should be skipped and the invariant just checked at the end of the transaction). Then the invariant's function is added to a proposed invariants list.
+
+When it's time to commit, lots of things happen.
+
+First, we run all of our proposed invariants, each in a nested transaction that we then immediately abort. These will cause aborts or retries to happen as necessary, and variables that they access will automatically be added to our transaction's read set. (I don't think we need to run invariants on vars accessed by the invariants themselves as modifications made by invariants never commit, but I need to think about this and make sure.) We keep track of the variables each of these invariant runs accesses.
+
+Then we run all of our threatened invariants, likewise keeping track of the variables that they access.
+
+Then we lock on the global lock and check all of the vars we've accessed to make sure none of them changed.
+
+Then we check all of the invariants we ran and make sure that none of them changed either.
+
+Then, for each invariant that was threatened, we look at the difference between its current dependency set and the list of variables it accessed during this run. For each variable in the dependency set but not accessed this time, we remove the invariant from the variable's invariant list. For each variable accessed this time but not in the dependency set, we add the invariant to the variable's invariant list. Then we update the invariant's dependency set to be the set of variables it accessed during this run and increment the invariant's modification time as necessary.
+
+Then, for each invariant that was proposed during this transaction, we create a new invariant object with the set of variables that the invariant accessed during this run and set its modification time to our current transaction's version number.
+
+Then we unlock.
+
+...and I think that should actually be it. That was simpler than I thought.
+
+I still haven't handled invariants from within nested transactions, though. Those'll need some more thought, but I'm going to go to bed and finish that up later.
+
+(The current system would work as-is, but wouldn't enforce any sort of invariant checking on nested transaction boundaries.)
+
+(Also, note to self: remember to update previously() accordingly, such that the newly-created base transaction's threatened invariant set is merged into the actual base transaction's invariant set. I'm also almost certain the proposed invariant set should be merged in as well, but I need to think about whether that should happen or whether proposing an invariant in a previously run should do anything at all.) 
+
+
+
+
 
 
 
