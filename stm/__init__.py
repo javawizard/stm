@@ -594,7 +594,7 @@ def atomically(function):
     atomically() fully supports nested transactions. If a nested transaction
     throws an exception, the changes it made are reverted, and the exception
     propagated out of the call to atomically().
-        
+    
     The return value of atomically() is the return value of the function that
     was passed to it.
     """
