@@ -18,22 +18,22 @@ import time
 __all__ = ["TVar", "TWeakRef", "atomically", "retry", "or_else"]
 
 
-class _RetryImmediately(BaseException):
+class _Restart(BaseException):
     """
-    Raised when a transaction needs to retry immediately. This happens when an
-    attempt is made to read a variable that has been modified since the
-    transaction started. It also happens just after the transaction has
-    finished blocking in response to a _RetryLater.
+    Raised when a transaction needs to restart. This happens when an attempt is
+    made to read a variable that has been modified since the transaction
+    started. It also happens just after the transaction has finished blocking
+    in response to a _Retry.
     """
     pass
 
-class _RetryLater(BaseException):
+class _Retry(BaseException):
     """
     Raised when a transaction should retry at some later point, when at least
     one of the variables it accessed has been modified. This happens when
     retry() is called, and causes the toplevel transaction to block until one
     of the variables accessed in this transaction has been modified; the
-    toplevel transaction then converts this into a _RetryImmediately.
+    toplevel transaction then converts this into a _Restart.
     """
     pass
 
@@ -148,10 +148,10 @@ class _Transaction(object):
     def get_real_value(self, var):
         """
         Returns the real value of the specified variable, possibly throwing
-        _RetryImmediately if the variable has been modified since this
-        transaction started. This will only be called once for any given var in
-        any given transaction; the value will thereafter be stored in
-        self.vars. This must be overridden by the subclass.
+        _Restart if the variable has been modified since this transaction
+        started. This will only be called once for any given var in any given
+        transaction; the value will thereafter be stored in self.vars.
+        This must be overridden by the subclass.
         """
         raise NotImplementedError
     
@@ -190,9 +190,9 @@ class _Transaction(object):
         just before it started.
         
         BaseTransaction will return another BaseTransaction with the same
-        start attribute, which will cause it to throw RetryImmediately if
-        anything's changed. NestedTransaction will most likely just return
-        another NestedTransaction with the same parent.
+        start attribute, which will cause it to throw _Restart if anything's
+        changed. NestedTransaction will most likely just return another
+        NestedTransaction with the same parent.
         
         (Note that this new transaction can only be used until self is
         committed, and the new transaction should not itself be committed.)
@@ -209,7 +209,7 @@ class _BaseTransaction(_Transaction):
     """
     A toplevel transaction. This class takes care of committing values to the
     actual variables' values (and synchronizing on the global lock while doing
-    so), blocking until vars are modified when a _RetryLater is caught, and so
+    so), blocking until vars are modified when a _Retry is caught, and so
     forth.
     """
     def __init__(self, overall_start_time, current_start_time, start=None):
@@ -234,8 +234,7 @@ class _BaseTransaction(_Transaction):
     
     def get_real_value(self, var):
         # Just check to make sure the variable hasn't been modified since we
-        # started (and raise _RetryImmediately if it has), then return its real
-        # value.
+        # started (and raise _Restart if it has), then return its real value.
         with _global_lock:
             var._check_clean()
             self.check_values.add(var)
@@ -251,7 +250,8 @@ class _BaseTransaction(_Transaction):
             self.commit()
             # And we're done!
             return result
-        except _RetryLater:
+        except _Retry:
+            # The transaction called retry(). Handle accordingly.
             self.retry_block()
     
     def commit(self):
@@ -278,8 +278,8 @@ class _BaseTransaction(_Transaction):
     def retry_block(self):
         # Received a retry request that made it all the way up to the top.
         # First, check to see if any of the variables we've accessed have
-        # been modified since we started, which could change whether or not
-        # we need to retry.
+        # been modified since we started; if they have, we need to restart
+        # instead.
         with _global_lock:
             for item in self.check_values:
                 item._check_clean()
@@ -304,8 +304,8 @@ class _BaseTransaction(_Transaction):
         with _global_lock:
             for item in self.retry_values:
                 item._remove_retry_event(e)
-        # And then we retry immediately.
-        raise _RetryImmediately
+        # And then we restart.
+        raise _Restart
     
     def make_previously(self):
         return _BaseTransaction(self.overall_start_time, self.current_start_time, self.start)
@@ -326,7 +326,7 @@ class _NestedTransaction(_Transaction):
     """
     A nested transaction. This just wraps another transaction and persists
     changes to it upon committing unless the function to run throws an
-    exception (of any sort, including _RetryImmediately and _RetryLater).
+    exception (of any sort, including _Retry and _Restart).
     """
     def __init__(self, parent):
         _Transaction.__init__(self)
@@ -340,9 +340,8 @@ class _NestedTransaction(_Transaction):
         return self.parent.get_value(var)
     
     def run(self, function):
-        # Run the function, then (if it didn't throw any exceptions;
-        # _RetryImmediately, _RetryLater, or otherwise) copy our values into
-        # our parent.
+        # Run the function, then (if it didn't throw any exceptions; _Restart,
+        # _Retry, or otherwise) copy our values into our parent.
         result = function()
         self.commit()
         return result
@@ -418,7 +417,8 @@ class TVar(object):
         # Check to see if our underlying value has been modified since the
         # start of this transaction, which should be a BaseTransaction
         if self._modified > _stm_state.get_base().start:
-            raise _RetryImmediately
+            # It has, so restart the transaction.
+            raise _Restart
     
     def _add_retry_event(self, e):
         self._events.add(e)
@@ -443,7 +443,7 @@ class TWeakRef(object):
     remains the same over the course of a given transaction. More specifically,
     if a TWeakRef's referent is garbage collected in the middle of a
     transaction that previously read the reference as alive, the transaction
-    will be immediately aborted and restarted from the top.
+    will be immediately restarted.
     
     A callback function can be specified when creating a TWeakRef; this
     function will be called in its own transaction when the value referred to
@@ -489,7 +489,7 @@ class TWeakRef(object):
             if value is None and self in _stm_state.get_base().live_weakrefs:
                 # Ref was live at some point during the past transaction but
                 # isn't anymore
-                raise _RetryImmediately
+                raise _Restart
             # Value isn't inconsistent. Add it to the retry list (so that we'll
             # retry if we get garbage collected) and the check list (so that
             # we'll be checked for consistency again at the end of the
@@ -522,15 +522,15 @@ class TWeakRef(object):
     
     def _check_clean(self):
         """
-        Raises _RetryImmediately if we're mature, our referent has been
-        garbage collected, and we're in our base transaction's live_weakrefs
-        list (which indicates that we previously read our referent as live
-        during this transaction).
+        Raises _Restart if we're mature, our referent has been garbage
+        collected, and we're in our base transaction's live_weakrefs list
+        (which indicates that we previously read our referent as live during
+        this transaction).
         """
         if self._mature and self._ref() is None and self in _stm_state.get_base().live_weakrefs:
             # Ref was live during the transaction but has since been
             # dereferenced
-            raise _RetryImmediately
+            raise _Restart
     
     def _make_mature(self):
         """
@@ -544,8 +544,8 @@ class TWeakRef(object):
         The reason we keep around a strong reference until the end of the
         transaction in which the TWeakRef was created is to prevent a TWeakRef
         created in a transaction from being collected mid-way through the
-        transaction and causing an immediate retry as a result, which would
-        result in an infinite loop.
+        transaction and causing a restart as a result, which would result in an
+        infinite restart loop.
         """
         self._mature = True
         self._ref = weakref_module.ref(self._ref, self._on_value_dead)
@@ -609,15 +609,15 @@ def atomically(function):
         # Then set it as the current transaction
         with _stm_state.with_current(transaction):
             # Then run the transaction. _BaseTransaction's implementation takes care
-            # of catching _RetryLater and blocking until one of the vars we read is
-            # modified, then converting it into a _RetryImmediately exception.
+            # of catching _Retry and blocking until one of the vars we read is
+            # modified, then converting it into a _Restart exception.
             try:
                 return transaction.run(function)
-            # Note that we'll only get _RetryLater thrown here if we're in a
-            # nested transaction, in which case we want it to propagate out, so
-            # we don't catch it here.
-            except _RetryImmediately:
-                # We were asked to retry immediately. If we're a toplevel transaction,
+            # Note that we'll only get _Retry thrown here if we're in a nested
+            # transaction, in which case we want it to propagate out, so we
+            # don't catch it here.
+            except _Restart:
+                # We were asked to restart. If we're a toplevel transaction,
                 # just continue. If we're a _NestedTransaction, propagate the
                 # exception up. TODO: Figure out a way to move this logic into
                 # individual methods on _Transaction that _BaseTransaction and
@@ -683,8 +683,8 @@ def retry(resume_after=None, resume_at=None):
             # want it to resume.
             _stm_state.get_base().update_resume_at(resume_at)
     # Either we didn't have a timeout or our timeout hasn't elapsed yet, so
-    # raise _RetryLater.
-    raise _RetryLater
+    # raise _Retry.
+    raise _Retry
 
 
 def or_else(*args):
@@ -716,11 +716,11 @@ def or_else(*args):
     _stm_state.get_current()
     for function in args:
         # Try to run each function in sequence, in its own transaction so that
-        # if it raises _RetryLater (or any other exception) its effects will be
+        # if it raises _Retry (or any other exception) its effects will be
         # undone.
         try:
             return atomically(function)
-        except _RetryLater:
+        except _Retry:
             # Requested a retry, so move on to the next alternative
             pass
     # All of the alternatives retried, so retry ourselves.
@@ -742,8 +742,8 @@ def previously(function, toplevel=False):
     """
     # We don't need any special retry handling in _BaseTransaction like I
     # thought we would because we're calling the function directly, not calling
-    # transaction.run(function), so we'll get _RetryImmediately and _RetryLater
-    # passed back out to us.
+    # transaction.run(function), so we'll get _Restart and _Retry passed back
+    # out to us.
     if toplevel:
         current = _stm_state.get_base()
     else:
