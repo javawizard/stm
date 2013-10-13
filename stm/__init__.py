@@ -221,6 +221,8 @@ class _BaseTransaction(_Transaction):
         self.retry_values = set()
         self.created_weakrefs = set()
         self.live_weakrefs = set()
+        self.proposed_invariants = []
+        self.threatened_invariants = set()
         self.resume_at = None
         # Store off the transaction id we're starting at, so that we know if
         # things have changed since we started.
@@ -235,10 +237,12 @@ class _BaseTransaction(_Transaction):
     def get_real_value(self, var):
         # Just check to make sure the variable hasn't been modified since we
         # started (and raise _Restart if it has), then return its real value.
+        # TODO: Update this comment to mention invariants
         with _global_lock:
             var._check_clean()
             self.check_values.add(var)
             self.retry_values.add(var)
+            self.threatened_invariants.update(var.invariants)
             return var._real_value
     
     def run(self, function):
@@ -390,6 +394,7 @@ class TVar(object):
         self._events = set()
         self._real_value = value
         self._modified = 0
+        self.invariants = set()
     
     def get(self):
         """
@@ -776,7 +781,8 @@ def invariant(function):
     the end of any transaction, that transaction will be immediately aborted,
     and the exception raised by the invariant propagated.
     """
-    raise NotImplementedError
+    # FIXME: Run the invariant first to make sure that it passes right now
+    _stm_state.get_base().proposed_invariants.append(function)
 
 
 
