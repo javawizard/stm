@@ -355,6 +355,23 @@ class _NestedTransaction(_Transaction):
         return _NestedTransaction(self.parent)
 
 
+class _Invariant(object):
+    """
+    A transactional invariant.
+    
+    These are objects created during commit time for every invariant proposed
+    with stm.invariant. They store the invariant's actual function and a list
+    of TVars that the invariant accessed during its last successful run.
+    
+    (They don't currently store references to TWeakRefs accessed during the
+    last run. I'll be changing this soon.)
+    """
+    def __init__(self, function):
+        self.function = function
+        self.modified = 0
+        self.dependencies = set()
+
+
 class TVar(object):
     """
     A transactional variable.
@@ -744,6 +761,22 @@ def previously(function, toplevel=False):
         # If it's a nested transaction, it will have already modified our base
         # by virtue of using our base as its parent, so we don't need to do
         # anything else.
+
+
+def invariant(function):
+    """
+    (This function is highly experimental and is not yet complete: invariants
+    cannot be proposed in a nested transaction yet.)
+    
+    Provides support for transactional invariants.
+    
+    This function is called to propose a new invariant. The passed-in function
+    must succeed (i.e. not throw any exceptions) now, at the end of the current
+    transaction, and at the end of every subsequent transaction. If it fails at
+    the end of any transaction, that transaction will be immediately aborted,
+    and the exception raised by the invariant propagated.
+    """
+    raise NotImplementedError
 
 
 
