@@ -182,6 +182,10 @@ class _Transaction(object):
         Sets the entry in self.vars for the specified variable to the specified
         value.
         """
+        # The logic for loading threatened invariants is in self.get_real_value,
+        # so call self.get_value to load invariants if needed before setting
+        # the var's value.
+        self.get_value(var)
         self.vars[var] = value
     
     def make_previously(self):
@@ -242,7 +246,7 @@ class _BaseTransaction(_Transaction):
             var._check_clean()
             self.check_values.add(var)
             self.retry_values.add(var)
-            self.threatened_invariants.update(var.invariants)
+            self.threatened_invariants.update(var._invariants)
             return var._real_value
     
     def run(self, function):
@@ -260,11 +264,46 @@ class _BaseTransaction(_Transaction):
     
     def commit(self):
         global _last_transaction
+        # First, we need to check invariants proposed during this
+        # transaction and invariants threatened by variable accesses during
+        # this transaction for consistency. We'll handle the former first.
+        invariant_accesses = {}
+        # Some of the invariants we run might access vars that cause
+        # additional invariants to be loaded; we don't need to check these,
+        # so iterate over a copy of self.threatened_invariants.
+        for invariant in self.threatened_invariants.copy():
+            # Create a nested transaction in which to run this invariant.
+            # This will ensure that side effects of running the invariant
+            # (including registering other invariants) aren't persisted.
+            invariant_transaction = _NestedTransaction(self)
+            with _stm_state.with_current(invariant_transaction):
+                # If the invariant aborts, requests a restart, or retries, the
+                # request should be passed along, so we don't need to catch any
+                # exceptions here.
+                invariant.function()
+            # Now store off the list of variables that the invariant
+            # accessed.
+            invariant_accesses[invariant] = set(invariant_transaction.vars.keys())
+        # Now we check proposed invariants for consistency. Invariants
+        # proposed in the invariants themselves won't be persisted, so we
+        # don't need to copy self.proposed_invariants like we did with
+        # self.threatened_invariants.
+        for function in self.proposed_invariants:
+            invariant_transaction = _NestedTransaction(self)
+            with _stm_state.with_current(invariant_transaction):
+                function()
+            invariant_accesses[_Invariant(function)] = set(invariant_transaction.vars.keys())
+        # All invariants were consistent. Now we acquire the global lock.
         with _global_lock:
-            # First, we need to make
-            # sure nothing it used changed in the mean time.
+            # Now we make sure nothing we read or modified changed since this
+            # transaction started.
             for item in self.check_values:
                 item._check_clean()
+            # We also check our invariants to make sure none of them changed
+            # since this transaction started.
+            for invariant in invariant_accesses:
+                if invariant.modified > self.start:
+                    raise _Restart
             # Nothing changed, so we're good to commit. First we make
             # ourselves a new id.
             _last_transaction += 1
@@ -274,6 +313,16 @@ class _BaseTransaction(_Transaction):
             # events for us.
             for var, value in self.vars.items():
                 var._update_real_value(value, modified)
+            # Then we update all of the invariants we ran.
+            for invariant, var_set in invariant_accesses.iteritems():
+                new_dependencies = var_set - invariant.dependencies
+                old_dependencies = invariant.dependencies - var_set
+                for var in old_dependencies:
+                    var._invariants.discard(invariant)
+                for var in new_dependencies:
+                    var._invariants.add(invariant)
+                invariant.dependencies = var_set
+                invariant.modified = modified
             # And then we tell all TWeakRefs created during this
             # transaction to mature
             for ref in self.created_weakrefs:
@@ -385,7 +434,8 @@ class TVar(object):
     More complex datatypes (such as TList, TDict, and TObject) are available in
     the tlist, tdict, and tobject modules, respectively.
     """
-    __slots__ = ["_events", "_real_value", "_modified", "__weakref__"]
+    __slots__ = ["_events", "_real_value", "_modified", "_invariants",
+                 "__weakref__"]
     
     def __init__(self, value=None):
         """
@@ -394,7 +444,7 @@ class TVar(object):
         self._events = set()
         self._real_value = value
         self._modified = 0
-        self.invariants = set()
+        self._invariants = set()
     
     def get(self):
         """
