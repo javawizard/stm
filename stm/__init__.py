@@ -280,7 +280,7 @@ class _BaseTransaction(_Transaction):
                 # If the invariant aborts, requests a restart, or retries, the
                 # request should be passed along, so we don't need to catch any
                 # exceptions here.
-                invariant.function()
+                invariant.check_invariant()
             # Now store off the list of variables that the invariant
             # accessed.
             invariant_accesses[invariant] = set(invariant_transaction.vars.keys())
@@ -291,8 +291,9 @@ class _BaseTransaction(_Transaction):
         for function in self.proposed_invariants:
             invariant_transaction = _NestedTransaction(self)
             with _stm_state.with_current(invariant_transaction):
-                function()
-            invariant_accesses[_Invariant(function)] = set(invariant_transaction.vars.keys())
+                new_invariant = _Invariant(function)
+                new_invariant.check_invariant()
+            invariant_accesses[new_invariant] = set(invariant_transaction.vars.keys())
         # All invariants were consistent. Now we acquire the global lock.
         with _global_lock:
             # Now we make sure nothing we read or modified changed since this
@@ -422,6 +423,17 @@ class _Invariant(object):
         self.function = function
         self.modified = 0
         self.dependencies = set()
+    
+    def check_invariant(self):
+        result = self.function()
+        if result is None or result is True:
+            return
+        if result is False:
+            raise Exception("Invariant %r was violated by the current "
+                            "transaction" % self.function)
+        else:
+            raise Exception("Invariant %r returned an unexpected value: %r"
+                            % (self.function, result))
 
 
 class TVar(object):
