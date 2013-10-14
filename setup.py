@@ -2,7 +2,7 @@ from setuptools import setup
 
 setup(
     name="stm",
-    version="0.2.5",
+    version="0.2.6",
     description="A software transactional memory library",
     author="Alexander Boyd",
     author_email="alex@opengroove.org",
