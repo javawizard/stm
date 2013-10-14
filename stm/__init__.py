@@ -422,7 +422,11 @@ class _Invariant(object):
     def __init__(self, function):
         self.function = function
         self.modified = 0
-        self.dependencies = set()
+        # We don't need to keep around vars that can't be referenced by
+        # anything else: if they're garbage collected, then the invariant
+        # function itself wouldn't have been able to access them during its
+        # next run, so we don't care about them.
+        self.dependencies = weakref_module.WeakSet()
     
     def check_invariant(self):
         result = self.function()
