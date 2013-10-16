@@ -2,8 +2,8 @@
 A pure-Python software transactional memory system.
 
 This module provides a software transactional memory system for Python. It
-provides full support for isolated transactions, as well as the ability for
-transactions to block as need be.
+provides full support for isolated transactions, blocking, timed blocking, and
+transactional invariants.
 
 Have a look at the documentation for the atomically() function and the TVar
 class. Those form the core building blocks of the STM system.
@@ -443,18 +443,19 @@ class TVar(object):
     """
     A transactional variable.
     
-    TVars are the main primitives used within the STM system. They can only be
-    read or written from within a call to atomically().
+    TVars are the main primitives used within the STM system. They hold a
+    reference to a single value. They can only be read or written from within a
+    call to atomically().
     
     More complex datatypes (such as TList, TDict, and TObject) are available in
-    the tlist, tdict, and tobject modules, respectively.
+    stm.datatypes.
     """
     __slots__ = ["_events", "_real_value", "_modified", "_invariants",
                  "__weakref__"]
     
     def __init__(self, value=None):
         """
-        Creates a TVar with the specified initial value.
+        Create a TVar with the specified initial value.
         """
         self._events = set()
         self._real_value = value
@@ -463,7 +464,7 @@ class TVar(object):
     
     def get(self):
         """
-        Returns the current value of this TVar.
+        Return the current value of this TVar.
         
         This can only be called from within a call to atomically(). An
         exception will be thrown if this method is called elsewhere.
@@ -473,7 +474,7 @@ class TVar(object):
     
     def set(self, value):
         """
-        Sets the value of this TVar to the specified value.
+        Set the value of this TVar to the specified value.
         
         This can only be called from within a call to atomically(). An
         exception will be thrown if this method is called elsewhere.
@@ -515,7 +516,7 @@ class TWeakRef(object):
     transaction that previously read the reference as alive, the transaction
     will be immediately restarted.
     
-    A callback function can be specified when creating a TWeakRef; this
+    A callback function may be specified when creating a TWeakRef; this
     function will be called in its own transaction when the value referred to
     by the TWeakRef is garbage collected, if the TWeakRef itself is still
     alive. Note that the callback function will only be called if the
@@ -548,7 +549,7 @@ class TWeakRef(object):
     
     def get(self):
         """
-        Returns the value that this weak reference refers to, or None if its
+        Return the value that this weak reference refers to, or None if its
         value has been garbage collected.
         
         This will always return the same value over the course of a given
@@ -709,7 +710,7 @@ def retry(resume_after=None, resume_at=None):
     detected state with which it isn't yet ready to continue (for example, a
     queue from which an item is to be read is actually empty). The current
     transaction will be immediately aborted and automatically restarted once
-    the STM system detects that it would produce a different result.
+    at least one of the TVars it read has been modified.
     
     This can be used to make, for example, a blocking queue from a list with a
     function like the following:
@@ -757,13 +758,13 @@ def retry(resume_after=None, resume_at=None):
     raise _Retry
 
 
-def or_else(*args):
+def or_else(*functions):
     """
-    Runs (and returns the value produced by) the first function passed to this
+    Run (and return the value produced by) the first function passed into this
     function that does not retry (see the documentation of the retry()
-    function), or retries if all of the passed-in functions
-    retry (or if no arguments are passed in). See the documentation for
-    retry() for more information. 
+    function), or retry if all of the passed-in functions retry (or if no
+    arguments are passed in). See the documentation for retry() for more
+    information.
     
     This function could be considered the STM equivalent of Unix's select()
     system call. One could, for example, read an item from the first of two
@@ -779,12 +780,12 @@ def or_else(*args):
     item = or_else(q1.get, lambda: None)
     
     Note that each function passed in is automatically run in its own nested
-    transaction, so that the effects of those that end up retrying are reverted
+    transaction so that the effects of those that end up retrying are reverted
     and only the effects of the function that succeeds are persisted.
     """
     # Make sure we're in a transaction
     _stm_state.get_current()
-    for function in args:
+    for function in functions:
         # Try to run each function in sequence, in its own transaction so that
         # if it raises _Retry (or any other exception) its effects will be
         # undone.
@@ -802,8 +803,8 @@ def previously(function, toplevel=False):
     (This function is experimental and will likely change in the future. I'd
     also like feedback on how useful it is.)
     
-    Returns the value that the specified function would have returned had it
-    been run in a transaction just before the current transaction started.
+    Return the value that the specified function would have returned had it
+    been run in a transaction just prior to the current one.
     
     If toplevel is False, the specified function will be run as if it were just
     before the start of the innermost nested transaction, if any. If toplevel
@@ -841,10 +842,16 @@ def invariant(function):
     Provides support for transactional invariants.
     
     This function is called to propose a new invariant. The passed-in function
-    must succeed (i.e. not throw any exceptions) now, at the end of the current
-    transaction, and at the end of every subsequent transaction. If it fails at
-    the end of any transaction, that transaction will be immediately aborted,
-    and the exception raised by the invariant propagated.
+    must succeed now, at the end of the current transaction, and at the end of
+    every subsequent transaction. If it fails at the end of any transaction,
+    that transaction will be immediately aborted, and the exception raised by
+    the invariant propagated.
+    
+    To succeed, an invariant function must return either None or True. It can
+    indicate failure either by returning False or by raising an exception. This
+    allows both invariants that signal failure by raising an exception and
+    invariants that signal success/failure by returning the value of a simple
+    boolean expression.
     """
     # FIXME: Run the invariant first to make sure that it passes right now
     _stm_state.get_base().proposed_invariants.append(function)
