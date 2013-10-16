@@ -254,7 +254,7 @@ class _BaseTransaction(_Transaction):
         try:
             # First we actually run the transaction.
             result = function()
-            # _Transaction appears to have run successfully, so commit it.
+            # Transaction appears to have run successfully, so commit it.
             self.commit()
             # And we're done!
             return result
