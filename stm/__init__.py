@@ -433,8 +433,7 @@ class _Invariant(object):
         if result is None or result is True:
             return
         if result is False:
-            raise Exception("Invariant %r was violated by the current "
-                            "transaction" % self.function)
+            raise Exception("Invariant %r was violated" % self.function)
         else:
             raise Exception("Invariant %r returned an unexpected value: %r"
                             % (self.function, result))
