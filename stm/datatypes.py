@@ -471,4 +471,45 @@ class BroadcastEndpoint(TObject):
         return self.duplicate()
 
 
+class TMutableWeakRef(TObject):
+    """
+    (This class is experimental.)
+    
+    A transactional mutable weak reference.
+    
+    This class is a hybrid of stm.TWeakRef and stm.TVar: it holds a weak
+    reference to its value, but permits its value to be modified as desired.
+    
+    A function to be called when the value referred to by this TMutableWeakRef
+    is garbage collected may be specified. This callback will only be called
+    when the TMutableWeakRef's current value is garbage collected; it will not
+    be called on garbage collection of any of its former values.
+    """
+    def __init__(self, value, callback=None):
+        """
+        Create a TMutableWeakRef with the specified initial value.
+        
+        Note that, as Python does not permit weak references to None, an
+        initial non-None value must be specified.
+        """
+        self._callback = callback
+        # Set a dummy _callback_var for self.set's sake
+        self._callback_var = stm.TVar()
+        self.set(value)
+    
+    def set(self, value):
+        self._callback_var.set(False)
+        self._callback_var = stm.TVar(True)
+        def callback_wrapper(v=self._callback_var, c=self._callback):
+            if v.get():
+                c()
+        self._ref = stm.TWeakRef(value, callback_wrapper)
+    
+    def get(self):
+        return self._ref.get()
+    
+    def __call__(self):
+        return self.get()
+
+
 

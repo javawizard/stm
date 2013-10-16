@@ -529,6 +529,9 @@ class TWeakRef(object):
     def block_until_garbage_collected(some_weak_ref):
         if some_weak_ref.get() is not None:
             retry()
+    
+    TWeakRefs are not mutable. If mutable weak references are desired, see
+    stm.datatypes.TMutableWeakRef.
     """
     def __init__(self, value, callback=None):
         self._events = set()
