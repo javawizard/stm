@@ -498,7 +498,8 @@ class TMutableWeakRef(TObject):
         self.set(value)
     
     def set(self, value):
-        self._callback_var.set(False)
+        if self._ref.get() is not None:
+            self._callback_var.set(False)
         self._callback_var = stm.TVar(True)
         def callback_wrapper(v=self._callback_var, c=self._callback):
             if v.get():
