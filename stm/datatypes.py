@@ -248,20 +248,20 @@ class TDict(MutableMapping):
         return iter(self)
     
     def keys(self):
-        return list(self.iterkeys())
+        return TList(self.iterkeys())
     
     def itervalues(self):
         for entry in ttftree.value_iterator(self.var.get()):
             yield entry.value
     
     def values(self):
-        return list(self.itervalues())
+        return TList(self.itervalues())
     
     def iteritems(self):
         return ttftree.value_iterator(self.var.get())
     
     def items(self):
-        return list(self.iteritems())
+        return TList(self.iteritems())
     
     def __str__(self):
         return "TDict(%r)" % stm.atomically(lambda: dict(self))
