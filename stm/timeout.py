@@ -1,3 +1,10 @@
+"""
+NOTE: This module is now mostly obsolete with the introduction of first-class
+timeouts to stm.retry(). It offers an alternative mechanism for effecting
+timeouts that, while not requiring any additional support in the core STM
+system, does not compose nearly as well as the mechanism now built into
+stm.retry(). It will likely be going away soon.
+"""
 
 from threading import Thread
 import time
