@@ -876,11 +876,11 @@ def invariant(function):
     that transaction will be immediately aborted, and the exception raised by
     the invariant propagated.
     
-    To succeed, an invariant function must return either None or True. It can
-    indicate failure either by returning False or by raising an exception. This
-    allows both invariants that signal failure by raising an exception and
-    invariants that signal success/failure by returning the value of a simple
-    boolean expression.
+    To succeed, a function must return either None or True. It can indicate
+    failure either by returning False or by raising an exception. This allows
+    both invariants that signal failure by raising an exception and invariants
+    that signal success/failure by returning the value of a simple boolean
+    expression.
     """
     # FIXME: Run the invariant first to make sure that it passes right now
     _stm_state.get_base().proposed_invariants.append(function)
