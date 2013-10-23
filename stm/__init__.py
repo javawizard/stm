@@ -698,8 +698,23 @@ def atomically(function):
                 # _NestedTransaction can override accordingly.
                 if toplevel:
                     # Update our current_start_time in preparation for our next
-                    # run before continuing
-                    current_start_time = time.time()
+                    # run before continuing. Using the lesser of the last
+                    # requested resume time and the current time instead of the
+                    # current time alone gives us deterministic behavior with
+                    # something like:
+                    # 
+                    # atomically(lambda: or_else(lambda: retry(1.00001) or "a", lambda: retry(1) or "b"))
+                    # 
+                    # Were we to always use the current time instead of the
+                    # last requested resume time, we'd have a race condition
+                    # wherein "b" is returned if the transaction is able to
+                    # wake up and resume within 0.00001 seconds or "a" if it is
+                    # unable to do so. Using the last requested resume time
+                    # guarantees that "b" will always be returned.
+                    if transaction.resume_at is not None:
+                        current_start_time = min(transaction.resume_at, time.time())
+                    else:
+                        current_start_time = time.time()
                     continue
                 else:
                     raise
