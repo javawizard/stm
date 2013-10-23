@@ -15,7 +15,8 @@ import weakref as weakref_module
 from contextlib import contextmanager
 import time
 
-__all__ = ["TVar", "TWeakRef", "atomically", "retry", "or_else"]
+__all__ = ["TVar", "TWeakRef", "atomically", "retry", "or_else", "invariant",
+           "previously"]
 
 
 class _Restart(BaseException):
@@ -818,8 +819,7 @@ def or_else(*functions):
 
 def previously(function, toplevel=False):
     """
-    (This function is experimental and will likely change in the future. I'd
-    also like feedback on how useful it is.)
+    (This function is highly experimental. Use at your own risk.)
     
     Return the value that the specified function would have returned had it
     been run in a transaction just prior to the current one.
@@ -828,6 +828,17 @@ def previously(function, toplevel=False):
     before the start of the innermost nested transaction, if any. If toplevel
     is True, the specified function will be run as if it were just before the
     start of the outermost transaction.
+    
+    This function can be used to propose invariants that reason about changes
+    made over the course of a transaction, like the following invariant that
+    prevents a particular variable from ever being decremented:
+    
+    @invariant
+    def _():
+        old_value = previously(lambda: some_var.get())
+        new_value = some_var.get()
+        if new_value < old_value:
+            raise Exception("This var cannot be decremented")
     """
     # We don't need any special retry handling in _BaseTransaction like I
     # thought we would because we're calling the function directly, not calling
