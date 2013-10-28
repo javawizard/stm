@@ -222,6 +222,7 @@ class _BaseTransaction(_Transaction):
         self.parent = None
         self.overall_start_time = overall_start_time
         self.current_start_time = current_start_time
+        self.next_start_time = current_start_time
         self.check_values = set()
         self.retry_values = set()
         self.created_weakrefs = set()
@@ -359,6 +360,16 @@ class _BaseTransaction(_Transaction):
         with _global_lock:
             for item in self.retry_values:
                 item._remove_retry_event(e)
+        # Then we compute the current_start_time the next transaction attempt
+        # should see. If we didn't have a resume_at specified (i.e. we blocked
+        # solely on changes to TVars etc. we'd read), we use the current time;
+        # if we did, we use the lesser of the indicated resume_at and the
+        # current time (in case we resumed earlier than requested due to TVar
+        # etc. changes).
+        if self.resume_at is None:
+            self.next_start_time = time.time()
+        else:
+            self.next_start_time = min(time.time(), self.resume_at)
         # And then we restart.
         raise _Restart
     
@@ -699,23 +710,8 @@ def atomically(function):
                 # _NestedTransaction can override accordingly.
                 if toplevel:
                     # Update our current_start_time in preparation for our next
-                    # run before continuing. Using the lesser of the last
-                    # requested resume time and the current time instead of the
-                    # current time alone gives us deterministic behavior with
-                    # something like:
-                    # 
-                    # atomically(lambda: or_else(lambda: retry(1.00001) or "a", lambda: retry(1) or "b"))
-                    # 
-                    # Were we to always use the current time instead of the
-                    # last requested resume time, we'd have a race condition
-                    # wherein "b" is returned if the transaction is able to
-                    # wake up and resume within 0.00001 seconds or "a" if it is
-                    # unable to do so. Using the last requested resume time
-                    # guarantees that "b" will always be returned.
-                    if transaction.resume_at is not None:
-                        current_start_time = min(transaction.resume_at, time.time())
-                    else:
-                        current_start_time = time.time()
+                    # run before continuing.
+                    current_start_time = transaction.next_start_time
                     continue
                 else:
                     raise
