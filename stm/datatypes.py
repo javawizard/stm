@@ -33,9 +33,9 @@ class TList(MutableSequence):
     afn.ttftree module) using afn.ttftree.MEASURE_ITEM_COUNT as its measure.
     They thus give rise to some rather good performance characteristics:
     
-          Time complexity:   Operations that run using this time complexity:
-        
         +------------------+--------------------------------------------------+
+        | Time complexity: | Operations that run using this time complexity:  +
+        +==================+==================================================+
         | amortized O(1)   | Inserting, removing, or looking up an item at    |
         |                  | either end of the list, e.g.:                    |
         |                  |     self.append(some_value)                      |
