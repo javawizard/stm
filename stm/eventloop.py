@@ -49,7 +49,7 @@ class EventLoop(object):
                 raise
 
 
-default_event_loop = EventLoop()
+default_event_loop = stm.atomically(EventLoop)
 default_event_loop.start()
 
 def schedule(function):

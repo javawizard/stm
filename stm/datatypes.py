@@ -34,36 +34,39 @@ class TList(MutableSequence):
     They thus give rise to some rather good performance characteristics:
     
         +------------------+--------------------------------------------------+
-        | Time complexity: | Operations that run using this time complexity:  +
+        | Time complexity: | Operations that run using this time complexity:  |
         +==================+==================================================+
         | amortized O(1)   | Inserting, removing, or looking up an item at    |
         |                  | either end of the list, e.g.:                    |
-        |                  |     self.append(some_value)                      |
-        |                  |     self.pop()                                   |
-        |                  |     self.insert(0, some_value)                   |
-        |                  |     some_value = list[0]                         |
-        |                  |     some_value = list[-1]                        |
+        |                  |                                                  |
+        |                  |  * self.append(some_value)                       |
+        |                  |  * self.pop()                                    |
+        |                  |  * self.insert(0, some_value)                    |
+        |                  |  * some_value = list[0]                          |
+        |                  |  * some_value = list[-1]                         |
         +------------------+--------------------------------------------------+
         | O(1)             | len(self)                                        |
+        |                  |                                                  |
         |                  | iter(self) (but note that calling the returned   |
         |                  | iterator's next() method is amortized O(1))      |
-        +------------------+--------------------------------------------------|
+        +------------------+--------------------------------------------------+
         | O(log n)         | Inserting, removing, or looking up an item by an |
         |                  | arbitrary index, e.g.:                           |
-        |                  |     insert(n, some_value)                        |
-        |                  |     some_value = list[n]                         |
-        |                  |     list[n] = some_value                         |
-        |                  |     del list[n], etc.                            |
-        +------------------+--------------------------------------------------|
+        |                  |                                                  |
+        |                  |  * insert(n, some_value)                         |
+        |                  |  * some_value = list[n]                          |
+        |                  |  * list[n] = some_value                          |
+        |                  |  * del list[n], etc.                             |
+        +------------------+--------------------------------------------------+
         | O(log min(m, n)) | Concatenating two lists, e.g.:                   |
-        | where m and n    |     list1 + list2                                |
-        | are the sizes of |     list1.extend(list2)                          |
-        | the two lists    |                                                  |
+        | where m and n    |                                                  |
+        | are the sizes of |  * list1 + list2                                 |
+        | the two lists    |  * list1.extend(list2)                           |
         | involved         |                                                  |
         +------------------+--------------------------------------------------+
         | O(log r) where r | Slicing a list, e.g.:                            |
-        | is the size of   |     list[m:n]                                    |
-        | the returned     |                                                  |
+        | is the size of   |                                                  |
+        | the returned     |  * list[m:n]                                     |
         | list             |                                                  |
         +------------------+--------------------------------------------------+
     

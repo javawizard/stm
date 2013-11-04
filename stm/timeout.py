@@ -1,4 +1,6 @@
 """
+Obsolete module providing timeout support for transactions
+
 NOTE: This module is now mostly obsolete with the introduction of first-class
 timeouts to stm.retry(). It offers an alternative mechanism for effecting
 timeouts that, while not requiring any additional support in the core STM
@@ -59,18 +61,18 @@ def make_delay(seconds):
     
     This can be used to implement timeouts in transactions. For example, one
     could wait for an item to become available on a queue, timing out after,
-    say, ten seconds, with the following:
+    say, ten seconds, with the following::
     
-    var = make_delay(10)
-    def get_item():
-        try:
-            return some_queue.get(block=False)
-        except Empty:
-            if var.get():
-                raise Timeout # Or some other exception
-            else:
-                retry()
-    item = atomically(get_item)
+        var = make_delay(10)
+        def get_item():
+            try:
+                return some_queue.get(block=False)
+            except Empty:
+                if var.get():
+                    raise Timeout # Or some other exception
+                else:
+                    retry()
+        item = atomically(get_item)
     
     Note that this function must be called outside of a transaction (indeed, it
     will throw an exception if called from within one). The reasons for this

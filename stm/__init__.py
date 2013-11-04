@@ -82,20 +82,20 @@ class _Timer(_Thread):
     """
     A timer similar to threading.Timer but with a few differences:
     
-        This class waits significantly longer (0.5 seconds at present) between
-        checks to see if we've been canceled before we're actually supposed to
-        time out. This isn't visible to transactions themselves (they always
-        respond instantly to any changes that could make them complete sooner),
-        but it 1: saves us a decent bit of CPU time, but 2: means that if a
-        transaction resumes for a reason other than because it timed out, the
-        timeout thread will hang around for up to half a second before dying.
-        
-        This class accepts timeouts specified in terms of the wall clock time
-        (in terms of time.time()) at which the timer should go off rather than
-        the number of seconds after which they should resume.
-        
-        This class accepts a retry event to notify instead of a function to
-        call, mainly to avoid one layer of unnecessary indirection.
+     * This class waits significantly longer (0.5 seconds at present) between
+       checks to see if we've been canceled before we're actually supposed to
+       time out. This isn't visible to transactions themselves (they always
+       respond instantly to any changes that could make them complete sooner),
+       but it 1: saves us a decent bit of CPU time, but 2: means that if a
+       transaction resumes for a reason other than because it timed out, the
+       timeout thread will hang around for up to half a second before dying.
+       
+     * This class accepts timeouts specified in terms of the wall clock time
+       (in terms of time.time()) at which the timer should go off rather than
+       the number of seconds after which they should resume.
+       
+     * This class accepts a retry event to notify instead of a function to
+       call, mainly to avoid one layer of unnecessary indirection.
     
     The whole reason we're busywaiting here is because Python [versions earlier
     than 3.n, where n is a number I don't remember at the moment] don't expose
@@ -536,11 +536,11 @@ class TWeakRef(object):
     
     TWeakRefs are fully compatible with the retry() function; that is, a
     function such as the following works as expected, and blocks until the
-    TWeakRef's referent has been garbage collected:
+    TWeakRef's referent has been garbage collected::
     
-    def block_until_garbage_collected(some_weak_ref):
-        if some_weak_ref.get() is not None:
-            retry()
+        def block_until_garbage_collected(some_weak_ref):
+            if some_weak_ref.get() is not None:
+                retry()
     
     TWeakRefs are not mutable. If mutable weak references are desired, see
     stm.datatypes.TMutableWeakRef.
@@ -728,13 +728,13 @@ def retry(resume_after=None, resume_at=None):
     at least one of the TVars it read has been modified.
     
     This can be used to make, for example, a blocking queue from a list with a
-    function like the following:
+    function like the following::
     
-    def pop_or_block(some_list):
-        if len(some_list) > 0:
-            return some_list.pop()
-        else:
-            retry()
+        def pop_or_block(some_list):
+            if len(some_list) > 0:
+                return some_list.pop()
+            else:
+                retry()
     
     Functions making use of retry() can be multiplexed, a la Unix's select
     system call, with the or_else function. See its documentation for more
@@ -783,16 +783,16 @@ def or_else(*functions):
     
     This function could be considered the STM equivalent of Unix's select()
     system call. One could, for example, read an item from the first of two
-    queues, q1 and q2, to actually produce an item with something like this:
+    queues, q1 and q2, to actually produce an item with something like this::
     
-    item = or_else(q1.get, q2.get)
+        item = or_else(q1.get, q2.get)
     
     or_else can also be used to make non-blocking variants of blocking
     functions. For example, given one of our queues above, we can get the first
     value available from the queue or, if it does not currently have any values
-    available, return None with:
+    available, return None with::
     
-    item = or_else(q1.get, lambda: None)
+        item = or_else(q1.get, lambda: None)
     
     Note that each function passed in is automatically run in its own nested
     transaction so that the effects of those that end up retrying are reverted
@@ -827,14 +827,14 @@ def previously(function, toplevel=False):
     
     This function can be used to propose invariants that reason about changes
     made over the course of a transaction, like the following invariant that
-    prevents a particular variable from ever being decremented:
+    prevents a particular variable from ever being decremented::
     
-    @invariant
-    def _():
-        old_value = previously(lambda: some_var.get())
-        new_value = some_var.get()
-        if new_value < old_value:
-            raise Exception("This var cannot be decremented")
+        @invariant
+        def _():
+            old_value = previously(lambda: some_var.get())
+            new_value = some_var.get()
+            if new_value < old_value:
+                raise Exception("This var cannot be decremented")
     """
     # We don't need any special retry handling in _BaseTransaction like I
     # thought we would because we're calling the function directly, not calling
