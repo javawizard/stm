@@ -546,6 +546,16 @@ class TWeakRef(object):
     stm.datatypes.TMutableWeakRef.
     """
     def __init__(self, value, callback=None):
+        """
+        Create a new weak reference pointing to the specified value.
+        
+        Unlike ordinary Python weak references, instances of this class can
+        hold "weak references to None"; such references always appear alive (as
+        one might expect; by virtue of None's status as a builtin, it is never
+        garbage collected), and the passed-in callback will never be invoked.
+        This allows classes like TMutableWeakRef to permit their value to be
+        set to None as needed.
+        """
         self._events = set()
         self._mature = False
         self._ref = value
@@ -633,6 +643,9 @@ class TWeakRef(object):
         transaction and causing a restart as a result, which would result in an
         infinite restart loop.
         """
+        # If our value is None, don't mature ourselves.
+        if self._ref is None:
+            return
         self._mature = True
         self._ref = weakref_module.ref(self._ref, self._on_value_dead)
     

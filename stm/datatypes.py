@@ -540,12 +540,10 @@ class TMutableWeakRef(TObject):
     when the TMutableWeakRef's current value is garbage collected; it will not
     be called on garbage collection of any of its former values.
     """
-    def __init__(self, value, callback=None):
+    def __init__(self, value=None, callback=None):
         """
-        Create a TMutableWeakRef with the specified initial value.
-        
-        Note that, as Python does not permit weak references to None, an
-        initial non-None value must be specified.
+        Create a TMutableWeakRef with the specified initial value, which
+        defaults to None.
         """
         self._callback = callback
         # Set a dummy _callback_var for self.set's sake
