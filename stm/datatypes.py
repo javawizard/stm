@@ -24,13 +24,65 @@ class Full(Exception):
     pass
 
 
+class TValueIterator(object):
+    """
+    An iterator that transactionally produces values from a given ttftree.Tree.
+    
+    This class serves as a transactionally-safe alternative to (and has the
+    same performance characteristics as) ttftree.value_iterator. Instances
+    of TValueIterator can be shared among transactions, and calls to next()
+    within a given transaction are guaranteed to produce consecutive elements
+    from the tree. 
+    """
+    def __init__(self, tree, function=None):
+        """
+        Create a new TValueIterator that will yield values from the specified
+        ttftree.Tree.
+        
+        A one-argument translation function can be passed in; this will be
+        called with every item obtained from the tree just before it is to be
+        returned from next(), and the function's return value yielded instead
+        of the original value from the tree. One could use this to, for
+        example, create an iterator that yields the second item of every tuple
+        stored within a particular tree thus::
+            
+            some_tree = ...
+            iterator = TValueIterator(some_tree, lambda v: v[1])
+        
+        and indeed, this is precisely how TDict's iterkeys and itervalues
+        functions work.
+        """
+        # We use a TVar instead of subclassing from TObject for performance
+        # reasons, and because TObject uses TDict which in turn uses
+        # TValueIterator and I don't want to have to worry about any
+        # chicken-or-egg problems arising therefrom
+        self._var = stm.TVar(tree)
+        if function:
+            self._function = function
+        else:
+            self._function = lambda v: v
+    
+    def __iter__(self):
+        return self
+    
+    def __next__(self):
+        tree = self._var.get()
+        if tree.is_empty:
+            raise StopIteration
+        self._var.set(tree.without_first())
+        return self._function(tree.get_first())
+    
+    # Python 2.6 compatibility
+    next = __next__
+
+
 class TList(MutableSequence):
     """
     A transactional list.
     
     Internally, transactional lists are maintained with a single TVar holding a
     reference to a copy-on-write functional 2-3 finger tree (see the
-    afn.ttftree module) using afn.ttftree.MEASURE_ITEM_COUNT as its measure.
+    ttftree module) using ttftree.MEASURE_ITEM_COUNT as its measure.
     They thus give rise to some rather good performance characteristics:
     
         +------------------+--------------------------------------------------+
@@ -175,7 +227,7 @@ class TList(MutableSequence):
         return "TList(%r)" % stm.atomically(lambda: list(self))
     
     def __iter__(self):
-        return ttftree.value_iterator(self.var.get())
+        return TValueIterator(self.var.get())
     
     __repr__ = __str__
 
@@ -207,6 +259,8 @@ class TDict(MutableMapping):
     exception of __str__/__repr__, which, for the sake of convenience,
     wrap themselves in a call to stm.atomically() internally. 
     """
+    # TODO: Benchmark this to see how much faster direct tuple access would be
+    # over named tuple attribute access
     def __init__(self, initial_values=None):
         self.var = stm.TVar(ttftree.Empty(_DICT_MEASURE))
         if initial_values:
@@ -241,8 +295,7 @@ class TDict(MutableMapping):
         self.var.set(left.append(right.without_first()))
     
     def __iter__(self):
-        for entry in ttftree.value_iterator(self.var.get()):
-            yield entry.key
+        return TValueIterator(self.var.get(), lambda e: e.key)
     
     def __len__(self):
         self.var.get().annotation.index
@@ -254,14 +307,13 @@ class TDict(MutableMapping):
         return TList(self.iterkeys())
     
     def itervalues(self):
-        for entry in ttftree.value_iterator(self.var.get()):
-            yield entry.value
+        return TValueIterator(self.var.get(), lambda e: e.value)
     
     def values(self):
         return TList(self.itervalues())
     
     def iteritems(self):
-        return ttftree.value_iterator(self.var.get())
+        return TValueIterator(self.var.get())
     
     def items(self):
         return TList(self.iteritems())
