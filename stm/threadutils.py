@@ -8,6 +8,7 @@ import threading
 import stm
 import stm.datatypes
 import stm.eventloop
+import stm.utils
 import traceback
 
 # Thread has been created but start() hasn't been called
@@ -91,11 +92,8 @@ class ThreadPool(stm.datatypes.TObject):
         if need_new_thread:
             Thread(target=self._thread_run).start()
     
-    def join(self):
-        @stm.atomically
-        def _():
-            if self._tasks_scheduled > self._tasks_finished:
-                stm.retry()
+    def join(self, timeout_after=None, timeout_at=None):
+        stm.utils.wait_until(lambda: self._tasks_scheduled == self._tasks_finished, timeout_after, timeout_at)
     
     def _thread_run(self):
         while True:
