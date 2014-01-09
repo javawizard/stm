@@ -8,6 +8,7 @@ import threading
 import stm
 import stm.datatypes
 import stm.eventloop
+import traceback
 
 # Thread has been created but start() hasn't been called
 NEW = "stm.threadutils.NEW"
@@ -55,6 +56,70 @@ class Thread(stm.datatypes.TObject):
     @property
     def state(self):
         return stm.atomically(lambda: self._state)
+
+
+class ThreadPool(stm.datatypes.TObject):
+    def __init__(self, threads, keep_alive):
+        @stm.atomically
+        def _():
+            self._tasks = stm.datatypes.TList()
+            self._max_threads = threads
+            self._keep_alive = keep_alive
+            self._live_threads = 0
+            self._free_threads = 0
+    
+    def schedule(self, function):
+        @stm.atomically
+        def need_new_thread():
+            # Schedule the task to be run
+            self._tasks.insert(0, function)
+            # See if we should start a new thread
+            if self._free_threads == 0 and self._live_threads < self._max_threads:
+                # No free threads to handle this task and we haven't maxed out
+                # the number of threads we can start, so increment our live
+                # and free thread counters and start a new thread.
+                self._live_threads += 1
+                self._free_threads += 1
+                return True
+            else:
+                return False
+        # Do the actual thread starting if we're supposed to start a new thread
+        if need_new_thread:
+            Thread(target=self._thread_run).start()
+    
+    def _thread_run(self):
+        while True:
+            @stm.atomically
+            def task():
+                # See if we have any tasks to run
+                if self._tasks:
+                    # We do. Mark this thread as no longer free, then return
+                    # the task.
+                    self._free_threads -= 1
+                    return self._tasks.pop()
+                # No tasks yet, so wait the maximum amount of time we're
+                # supposed to stay alive without any tasks to run.
+                stm.retry(self._keep_alive)
+                # It's been self._keep_alive seconds and we haven't had any
+                # tasks to run, so decrement the number of live and free
+                # threads and then die.
+                self._free_threads -= 1
+                self._live_threads -= 1
+                return None
+            # Do the actual dying if we've been idle too long
+            if not task:
+                return
+            # We got a task to run. Run it.
+            try:
+                task()
+            except:
+                traceback.print_exc()
+            # We're done running the task, so mark ourselves as free again.
+            @stm.atomically
+            def _():
+                self._free_threads += 1
+
+
 
 
 
