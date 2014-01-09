@@ -25,7 +25,7 @@ def atomic_function(function):
     return wrapper
 
 
-def wait_until(function, timeout_after, timeout_at):
+def wait_until(function, timeout_after=None, timeout_at=None):
     """
     Wait until the specified function returns true. This is just short for::
     
