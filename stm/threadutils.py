@@ -62,17 +62,21 @@ class ThreadPool(stm.datatypes.TObject):
     def __init__(self, threads, keep_alive):
         @stm.atomically
         def _():
+            stm.datatypes.TObject.__init__(self)
             self._tasks = stm.datatypes.TList()
             self._max_threads = threads
             self._keep_alive = keep_alive
             self._live_threads = 0
             self._free_threads = 0
+            self._tasks_scheduled = 0
+            self._tasks_finished = 0
     
     def schedule(self, function):
         @stm.atomically
         def need_new_thread():
             # Schedule the task to be run
             self._tasks.insert(0, function)
+            self._tasks_scheduled += 1
             # See if we should start a new thread
             if self._free_threads == 0 and self._live_threads < self._max_threads:
                 # No free threads to handle this task and we haven't maxed out
@@ -86,6 +90,12 @@ class ThreadPool(stm.datatypes.TObject):
         # Do the actual thread starting if we're supposed to start a new thread
         if need_new_thread:
             Thread(target=self._thread_run).start()
+    
+    def join(self):
+        @stm.atomically
+        def _():
+            if self._tasks_scheduled > self._tasks_finished:
+                stm.retry()
     
     def _thread_run(self):
         while True:
@@ -118,6 +128,7 @@ class ThreadPool(stm.datatypes.TObject):
             @stm.atomically
             def _():
                 self._free_threads += 1
+                self._tasks_finished += 1
 
 
 
