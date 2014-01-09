@@ -21,6 +21,7 @@ FINISHED = "stm.threadutils.FINISHED"
 
 class Thread(stm.datatypes.TObject):
     def __init__(self, target=None):
+        stm.datatypes.TObject.__init__(self)
         if target:
             self.run = target
         self._state = NEW
