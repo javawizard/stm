@@ -82,7 +82,7 @@ class _Timer(_Thread):
     """
     A timer similar to threading.Timer but with a few differences:
     
-     * This class waits significantly longer (0.5 seconds at present) between
+     * This class waits significantly longer (0.3 seconds at present) between
        checks to see if we've been canceled before we're actually supposed to
        time out. This isn't visible to transactions themselves (they always
        respond instantly to any changes that could make them complete sooner),
@@ -124,7 +124,7 @@ class _Timer(_Thread):
             if self.cancel_event.is_set():
                 # We got a cancel request, so return.
                 return
-            time_to_sleep = min(0.5, self.resume_at - time.time())
+            time_to_sleep = min(0.3, self.resume_at - time.time())
             if time_to_sleep <= 0:
                 # Timeout's up! Notify the event, then return.
                 self.event.set()
