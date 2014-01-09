@@ -4,6 +4,7 @@ Transactional threads and thread pools.
 More documentation to come.
 """
 
+import threading
 import stm
 import stm.datatypes
 import stm.eventloop
@@ -21,10 +22,11 @@ FINISHED = "stm.threadutils.FINISHED"
 
 class Thread(stm.datatypes.TObject):
     def __init__(self, target=None):
-        stm.datatypes.TObject.__init__(self)
-        if target:
-            self.run = target
-        self._state = NEW
+        @stm.atomically
+        def _():
+            stm.datatypes.TObject.__init__(self)
+            self._target = target
+            self._state = NEW
     
     def start(self):
         @stm.atomically
@@ -33,18 +35,18 @@ class Thread(stm.datatypes.TObject):
             self._state = STARTED
     
     def run(self):
-        raise Exception("No target specified and run wasn't overridden.")
+        target = stm.atomically(lambda: self._target)
+        target()
     
     def _start_thread(self):
-        Thread(target=self._run_thread).start()
+        threading.Thread(target=self._run_thread).start()
     
     def _run_thread(self):
         @stm.atomically
-        def target():
+        def _():
             self._state = RUNNING
-            return self.run
         try:
-            target()
+            self.run()
         finally:
             @stm.atomically
             def _():
@@ -52,7 +54,7 @@ class Thread(stm.datatypes.TObject):
     
     @property
     def state(self):
-        return self._state
+        return stm.atomically(lambda: self._state)
 
 
 
