@@ -23,7 +23,17 @@ RUNNING = "stm.threadutils.RUNNING"
 FINISHED = "stm.threadutils.FINISHED"
 
 class Thread(stm.datatypes.TObject):
+    """
+    A transactional wrapper around Python's threading.Thread.
+    
+    Instances of this class can be created and started from within an STM
+    transaction. Threads started in such a way will begin running shortly
+    after the transaction commits.
+    """
     def __init__(self, target=None):
+        """
+        Create a new thread.
+        """
         @stm.atomically
         def _():
             stm.datatypes.TObject.__init__(self)
@@ -31,8 +41,17 @@ class Thread(stm.datatypes.TObject):
             self._state = NEW
     
     def start(self):
+        """
+        Start this thread.
+        
+        This can be called both inside and outside of a transaction. If it's
+        called from inside a transaction, the thread will begin running shortly
+        after the transaction commits.
+        """
         @stm.atomically
         def _():
+            if self._state != NEW:
+                raise RuntimeError("Threads can only be started once")
             stm.eventloop.schedule(self._start_thread)
             self._state = STARTED
     
@@ -56,16 +75,38 @@ class Thread(stm.datatypes.TObject):
     
     @property
     def state(self):
+        """
+        The state this thread is currently in. This will be one of:
+        
+         * NEW: This thread has been created but start() has not yet been
+           called
+        
+         * STARTED: start() has been called but the thread has not yet
+           commenced execution. Threads started from within a transaction will
+           remain in STARTED until shortly after the transaction commits.
+        
+         * RUNNING: The thread has commenced execution.
+         
+         * FINISHED: The thread has died.
+        """
         return stm.atomically(lambda: self._state)
 
 
 class ThreadPool(stm.datatypes.TObject):
-    def __init__(self, threads, keep_alive):
+    """
+    An object that schedules execution of functions across a pool of threads.
+    """
+    def __init__(self, max_threads, keep_alive):
+        """
+        Create a new ThreadPool that will use up to the specified number of
+        threads and that will keep idle threads alive for the specified number
+        of seconds before killing them off.
+        """
         @stm.atomically
         def _():
             stm.datatypes.TObject.__init__(self)
             self._tasks = stm.datatypes.TList()
-            self._max_threads = threads
+            self._max_threads = max_threads
             self._keep_alive = keep_alive
             self._live_threads = 0
             self._free_threads = 0
@@ -74,6 +115,10 @@ class ThreadPool(stm.datatypes.TObject):
     
     @stm.utils.atomic_function
     def schedule(self, function):
+        """
+        Schedule a function to be run by this thread pool. The function will
+        be executed as soon as one of this pool's threads is free.
+        """
         # Schedule the task to be run
         self._tasks.insert(0, function)
         self._tasks_scheduled += 1
@@ -87,6 +132,16 @@ class ThreadPool(stm.datatypes.TObject):
             Thread(target=self._thread_run).start()
     
     def join(self, timeout_after=None, timeout_at=None):
+        """
+        Wait until this thread pool is idle, i.e. all scheduled tasks have
+        completed. Note that a call to this function may never return if enough
+        calls to schedule() are being made to keep the thread pool saturated
+        with tasks to run.
+        
+        timeout_after and timeout_at specify a timeout (in the same format as
+        that given to stm.utils.wait_until) after which join() will give up
+        and raise stm.timeout.Timeout.
+        """
         stm.utils.wait_until(lambda: self._tasks_scheduled == self._tasks_finished, timeout_after, timeout_at)
     
     def _thread_run(self):
