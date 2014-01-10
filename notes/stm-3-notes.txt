@@ -1,0 +1,73 @@
+(Stuff I wrote down. See stm-3.txt for more info.)
+
+Restructure stm a bit so that TVars are just passed functions to call
+when a transaction commits changes to their values, and same with
+TWeakRefs.
+
+Then we could have a thing that lets us run a transaction, get the
+value it produced, then register a callback to be invoked whenever the
+value produced by that transaction would have changed. Something like:
+
+t = Tracker(function)
+t.run() # Probably returns the value produced by the function
+... at some later point ...
+t.register(listener) # Calls listener immediately if the result of the
+transaction has changed since run() was called, then calls it whenever
+the result changes
+
+Either the function would be run synchronously or it would be added to
+the event loop, not sure which yet.
+
+Internally, t.run() would store the version number of the transaction
+it used to actually run things, as well as a (probably weak) set of
+the vars the transaction run accessed. Then t.register would obtain
+the global lock, scan all of the vars accessed during t.run() and, if
+any of them have a later version number than the one we know about,
+assume that they've been changed since t.run() happened and invoke the
+callback. Then it would add a listener to each var's list of functions
+to notify when a transaction commits changes to the var; this listener
+re-runs the tracker's function and then passes the result to the
+tracker's registered listener.
+
+Note that, just after each time we re-run the function to see what its
+new value is after being told its value has probably changed, we
+should remove our listener from the vars it accessed last time and add
+our listener to the vars it accessed this time in case that set of
+vars has changed.
+
+This could be used to implement part of a FRP-like system on top of
+stm, and could be useful when writing a future bindings-like library.
+
+(And note that maybe the tracker should see if the values of any of
+the variables actually changed, i.e. if each variable's old value is
+no longer identitywise equal to its new value. Then we could have
+circular tracker dependencies, i.e. n has a tracker set up that
+modifies m and m has a tracker set up that modifies n in order to keep
+them in sync, and that would "just work" unless their trackers aren't
+"mirror images" of each other in which case they'd keep indefinitely
+updating each other (but that's ok anyway as that'd be a semantic
+issue))
+
+Actually, that could be used to implement a full bindings system, as
+then binding two things together just sets up trackers on those two
+things to update each other or something like that, but the function
+the tracker tracks checks to see if a flag indicating that the things
+are supposed to stay bound together has been cleared, and if so just
+returns, so then clearing that flag would cause the tracker to drop
+its watch on the value that's being bound to which would effectively
+unbind the values.
+
+So from that perspective, I think the eventloop idea is the way to go,
+i.e. that tracker callbacks are invoked on the event loop. Perhaps
+then stm's commit logic should invoke vars' I've-been-modified
+callbacks outside of the global lock (but things are still added to
+vars' lists on the global lock) so that they can themselves spawn off
+additional transactions if needed (like the one to add a thing to the
+event loop), and the only thing it'd do is block whoever calls the
+transaction that caused the functions to be called until they finish
+running. This should be fine with the retry logic as well.
+
+Make sure that this will work, though, in the face of the fact that
+vars bound to other vars won't actually change values until a future
+transaction when the event loop gets around to running the function
+that changes their values.

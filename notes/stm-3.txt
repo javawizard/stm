@@ -1,0 +1,6 @@
+Thinking about rewriting the core of the STM system again...
+
+(I can't seem to find any notes/etc that I wrote on my previous attempt to rewrite the core, so I'm going to just redo everything from scratch.)
+
+So, I imported some notes I wrote in my todo list about this rewrite of stm. They're in stm-3-notes.txt.
+
