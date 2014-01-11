@@ -4,3 +4,15 @@ Thinking about rewriting the core of the STM system again...
 
 So, I imported some notes I wrote in my todo list about this rewrite of stm. They're in stm-3-notes.txt.
 
+So...
+
+There could be a module, stm.core, that contains the lower-level classes.
+
+Then there could be a module, perhaps just stm/__init__ (or maybe stm.highlevel, which stm/__init__ would just re-export), that has higher level functions like atomically and such.
+
+And TVars would be a higher level construct, as (hopefully) would TWeakRefs, so they could perhaps be in their own modules, maybe stm.tvar and stm.tweakref or something.
+
+So let's think about the existing system and how it needs to change.
+
+So, there's the current mechanism that, after a transaction commits, notifies vars changed that they need to retry... Hm.
+
