@@ -60,6 +60,11 @@ Then, once we've run through all of the _Trackers, we look at the set of threate
 
 Assuming we get to this point without any of the functions or callbacks throwing an exception, we're good to go, so we commit the transaction.
 
+(Quick note: I think, during the transition to separate read/write sets, that we still need to validate the version clocks of vars that are just in the read set to make sure they didn't change since we started the transaction, since that could affect the values we should be writing to the vars in the write set. But I think we only need to /modify/ the version clocks of vars in the write set, although I need to do a bit more thinking about that. I suppose for now I can modify the versions clocks of both and then figure out later if I can get rid of the update of vars in the read set.)
+
+Oh, correction: we don't update the _Tracker's list of accessed vars inline, since that would be visible to other transactions. We instead store that in a dictionary and then, once we've acquired the global lock, modify the list. Note that we also can't /read/ the tracker's list of vars it accessed last time, and we also can't write the list of trackers each var needs to notify when it changes... But I think if we just track the list of vars a tracker accessed during each run in a dictionary (and overwrite that every time we re-entrantly run the tracker...) we should be fine. And then we preload each var's list of threatened trackers inside the code where we write a TVar for the first time, which would therefore need to acquire the global lock and check the version clock.
+
+
 
 
 
