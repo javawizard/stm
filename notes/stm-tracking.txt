@@ -64,6 +64,9 @@ Assuming we get to this point without any of the functions or callbacks throwing
 
 Oh, correction: we don't update the _Tracker's list of accessed vars inline, since that would be visible to other transactions. We instead store that in a dictionary and then, once we've acquired the global lock, modify the list. Note that we also can't /read/ the tracker's list of vars it accessed last time, and we also can't write the list of trackers each var needs to notify when it changes... But I think if we just track the list of vars a tracker accessed during each run in a dictionary (and overwrite that every time we re-entrantly run the tracker...) we should be fine. And then we preload each var's list of threatened trackers inside the code where we write a TVar for the first time, which would therefore need to acquire the global lock and check the version clock.
 
+Which is the one downside of separating the read set and the write set, or at least waiting to load the threatened invariant set until it's actually needed, when a var is written, is that then we end up acquiring the global lock twice during any transaction for vars that are read and then written rather than just once. But I think I can handle that for now, and I suppose I could always preload the threatened invariant set of a given var when it's read in anticipation of it being written at some point. But I'll worry about that later.
+
+So you know what, I think I'm going to go convert the STM system to use distinct read/write sets first.
 
 
 
