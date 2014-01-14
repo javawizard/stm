@@ -144,16 +144,30 @@ class _Transaction(object):
     known and for running functions within the scope of this transaction.
     """
     def __init__(self):
-        self.vars = {}
+        # Maps vars that we know about to their values
+        self.var_cache = {}
+        # Maps vars to the invariants modifications to them would threaten
+        self.threatened_invariants = set()
+        # Vars that were read before they were written, or never written (i.e.
+        # not vars that were written first). These are the vars for which
+        # load_real_value was called. This set also includes mature TWeakRefs
+        # that were read during this transaction.
+        self.read_set = set()
+        # Vars that have been written at any point during this transaction.
+        # These are the vars for which load_threatened_invariants was called.
+        self.write_set = set()
     
-    def get_real_value(self, var):
+    def load_real_value(self, var):
         """
         Returns the real value of the specified variable, possibly throwing
         _Restart if the variable has been modified since this transaction
         started. This will only be called once for any given var in any given
-        transaction; the value will thereafter be stored in self.vars.
+        transaction; the value will thereafter be stored in self.var_cache.
         This must be overridden by the subclass.
         """
+        raise NotImplementedError
+    
+    def load_threatened_invariants(self, var, set_to_augment):
         raise NotImplementedError
     
     def run(self, function):
@@ -166,28 +180,40 @@ class _Transaction(object):
     
     def get_value(self, var):
         """
-        Looks up the value of the specified variable in self.vars and returns
-        it, or calls self.get_real_value(var) (and then stores it in self.vars)
-        if the specified variable is not in self.vars. This is a concrete
-        function; subclasses need not override it.
+        Looks up the value of the specified variable in self.var_cache and
+        returns it, or calls self.get_real_value(var) (and then stores it in
+        self.var_cache) if the specified variable is not in self.var_cache.
+        This is a concrete function; subclasses need not override it.
         """
+        # Note: We intentionally don't add the var to the read set if we wrote
+        # it before we ever read it, as its value before the transaction
+        # happened doesn't matter as far as retries etc. go. (Note that we
+        # still validate its version clock when committing.)
+        # Also note that we check for the var's presence in self.var_cache
+        # instead of in read_set as there are situations where the var can end
+        # up in read_set without having a corresponding entry in self.var_cache
+        # (such as when it's read from within a function passed to
+        # previously()).
         try:
-            return self.vars[var]
+            return self.var_cache[var]
         except KeyError:
+            self.read_set.add(var)
             value = self.get_real_value(var)
-            self.vars[var] = value
+            self.var_cache[var] = value
             return value
     
     def set_value(self, var, value):
         """
-        Sets the entry in self.vars for the specified variable to the specified
-        value.
+        Sets the entry in self.var_cache for the specified variable to the
+        specified value.
         """
-        # The logic for loading threatened invariants is in self.get_real_value,
-        # so call self.get_value to load invariants if needed before setting
-        # the var's value.
-        self.get_value(var)
-        self.vars[var] = value
+#        The logic for loading threatened invariants is in self.get_real_value,
+#        so call self.get_value to load invariants if needed before setting
+#        the var's value.
+        if var not in self.write_set:
+            self.write_set.add(var)
+            self.threatened_invariants.update(self.load_threatened_invariants(var))
+        self.var_cache[var] = value
     
     def make_previously(self):
         """
@@ -223,12 +249,9 @@ class _BaseTransaction(_Transaction):
         self.overall_start_time = overall_start_time
         self.current_start_time = current_start_time
         self.next_start_time = current_start_time
-        self.check_values = set()
-        self.retry_values = set()
         self.created_weakrefs = set()
         self.live_weakrefs = set()
         self.proposed_invariants = []
-        self.threatened_invariants = set()
         self.resume_at = None
         # Store off the transaction id we're starting at, so that we know if
         # things have changed since we started.
@@ -240,19 +263,19 @@ class _BaseTransaction(_Transaction):
     def get_base_transaction(self):
         return self
     
-    def get_real_value(self, var):
+    def load_real_value(self, var):
         # Just check to make sure the variable hasn't been modified since we
         # started (and raise _Restart if it has), then return its real value.
-        # TODO: Update this comment to mention invariants
         with _global_lock:
-            var._check_clean()
-            self.check_values.add(var)
-            self.retry_values.add(var)
-            self.threatened_invariants.update(var._invariants)
+            var._check_clean(self)
             return var._real_value
     
+    def load_threatened_variants(self, var, set_to_augment):
+        with _global_lock:
+            var._check_clean(self)
+            set_to_augment.update(var._invariants)
+    
     def run(self, function):
-        global _last_transaction
         try:
             # First we actually run the transaction.
             result = function()
@@ -269,10 +292,11 @@ class _BaseTransaction(_Transaction):
         # First, we need to check invariants proposed during this
         # transaction and invariants threatened by variable accesses during
         # this transaction for consistency. We'll handle the former first.
-        invariant_accesses = {}
-        # Some of the invariants we run might access vars that cause
-        # additional invariants to be loaded; we don't need to check these,
-        # so iterate over a copy of self.threatened_invariants.
+        invariant_reads = {}
+        # We used to make a copy of self.threatened_invariants here, but the
+        # invariant loading logic has now been changed to only load invariants
+        # for vars when they're written, so threatened_invariants won't be
+        # modified while we're iterating.
         for invariant in self.threatened_invariants.copy():
             # Create a nested transaction in which to run this invariant.
             # This will ensure that side effects of running the invariant
@@ -283,41 +307,41 @@ class _BaseTransaction(_Transaction):
                 # request should be passed along, so we don't need to catch any
                 # exceptions here.
                 invariant.check_invariant()
-            # Now store off the list of variables that the invariant
-            # accessed.
-            invariant_accesses[invariant] = set(invariant_transaction.vars.keys())
+            # Now store off the list of variables that the invariant read.
+            invariant_reads[invariant] = invariant_transaction.read_set
         # Now we check proposed invariants for consistency. Invariants
         # proposed in the invariants themselves won't be persisted, so we
-        # don't need to copy self.proposed_invariants like we did with
+        # don't need to copy self.proposed_invariants like we used to with
         # self.threatened_invariants.
         for function in self.proposed_invariants:
             invariant_transaction = _NestedTransaction(self)
             with _stm_state.with_current(invariant_transaction):
                 new_invariant = _Invariant(function)
                 new_invariant.check_invariant()
-            invariant_accesses[new_invariant] = set(invariant_transaction.vars.keys())
+            invariant_reads[new_invariant] = invariant_transaction.read_set
         # All invariants were consistent. Now we acquire the global lock.
         with _global_lock:
             # Now we make sure nothing we read or modified changed since this
-            # transaction started.
-            for item in self.check_values:
-                item._check_clean()
+            # transaction started. This will take care of making sure that
+            # none of our TWeakRefs that we read as alive have since been
+            # garbage collected.
+            for item in self.read_set + self.write_set:
+                item._check_clean(self)
             # We also check our invariants to make sure none of them changed
             # since this transaction started.
-            for invariant in invariant_accesses:
-                if invariant.modified > self.start:
-                    raise _Restart
+            for invariant in invariant_reads:
+                invariant._check_clean(self)
             # Nothing changed, so we're good to commit. First we make
             # ourselves a new id.
             _last_transaction += 1
             modified = _last_transaction
-            # Then we update the real values of all of the TVars. Note that
-            # TVar._update_real_value takes care of notifying the TVar's
-            # events for us.
-            for var, value in self.vars.items():
+            # Then we update the real values of all of the TVars in the write
+            # set. Note that TVar._update_real_value takes care of notifying
+            # the TVar's events for us.
+            for var, value in self.write_set:
                 var._update_real_value(value, modified)
             # Then we update all of the invariants we ran.
-            for invariant, var_set in invariant_accesses.iteritems():
+            for invariant, var_set in invariant_reads.iteritems():
                 new_dependencies = var_set - invariant.dependencies
                 old_dependencies = invariant.dependencies - var_set
                 for var in old_dependencies:
@@ -335,14 +359,22 @@ class _BaseTransaction(_Transaction):
         # Received a retry request that made it all the way up to the top.
         # First, check to see if any of the variables we've accessed have
         # been modified since we started; if they have, we need to restart
-        # instead.
+        # instead. TODO: Do we really need to check the write set here? We're
+        # not modifying anything, just waiting for something in the read set to
+        # change, so methinks we don't need to...
+        # TODO: We also ought to consider wrapping the read set with a
+        # WeakSet here (or maybe making read_set a WeakSet to begin with) to
+        # avoid preventing vars from being garbage collected just because we're
+        # waiting for them to change, although that might not be necessary as
+        # (I think) we'll already be notified by whatever var or ref we
+        # accessed the var in question through...
         with _global_lock:
-            for item in self.check_values:
+            for item in self.read_set + self.write_set:
                 item._check_clean()
             # Nope, none of them have changed. So now we create an event,
-            # then add it to all of the vars we need to watch.
+            # then add it to all of the vars we've read.
             e = _Event()
-            for item in self.retry_values:
+            for item in self.read_set:
                 item._add_retry_event(e)
         # Then we create a timer to let us know when our retry timeout (if any
         # calls made during this transaction indicated one) is up. Note that
@@ -358,7 +390,7 @@ class _BaseTransaction(_Transaction):
         # events.
         timer.cancel()
         with _global_lock:
-            for item in self.retry_values:
+            for item in self.read_set:
                 item._remove_retry_event(e)
         # Then we compute the current_start_time the next transaction attempt
         # should see. If we didn't have a resume_at specified (i.e. we blocked
@@ -401,9 +433,17 @@ class _NestedTransaction(_Transaction):
     def get_base_transaction(self):
         return self.parent.get_base_transaction()
     
-    def get_real_value(self, var):
+    def load_real_value(self, var):
         # Just get the value from our parent.
         return self.parent.get_value(var)
+    
+    def load_threatened_invariants(self, var, set_to_augment):
+        # FIXME: We really need to have _Transaction cache this on a per-var
+        # basis so that we can delegate to something like
+        # self.parent.get_threatened_invariants that looks them up from the
+        # cache. That'll avoid needing to acquire the global lock once for
+        # every unique write in a given transaction.
+        return self.parent.load_threatened_invariants(var, set_to_augment)
     
     def run(self, function):
         # Run the function, then (if it didn't throw any exceptions; _Restart,
@@ -413,8 +453,8 @@ class _NestedTransaction(_Transaction):
         return result
     
     def commit(self):
-        for var, value in self.vars.items():
-            self.parent.set_value(var, value)
+        for var in self.write_set:
+            self.parent.set_value(var, self.var_cache[var])
     
     def make_previously(self):
         return _NestedTransaction(self.parent)
@@ -449,6 +489,10 @@ class _Invariant(object):
         else:
             raise Exception("Invariant %r returned an unexpected value: %r"
                             % (self.function, result))
+
+    def _check_clean(self, transaction):
+        if self.modified > transaction.start:
+            raise _Restart
 
 
 class TVar(object):
@@ -496,10 +540,10 @@ class TVar(object):
     
     value = property(get, set, doc="A property wrapper around self.get and self.set.")
     
-    def _check_clean(self):
+    def _check_clean(self, transaction):
         # Check to see if our underlying value has been modified since the
         # start of this transaction, which should be a BaseTransaction
-        if self._modified > _stm_state.get_base().start:
+        if self._modified > transaction.start:
             # It has, so restart the transaction.
             raise _Restart
     
@@ -559,6 +603,7 @@ class TWeakRef(object):
         self._events = set()
         self._mature = False
         self._ref = value
+        self._invariants = set()
         # Use the TVar hack we previously mentioned in the docstring for
         # ensuring that the callback is only run if we commit. TODO: Double
         # check to make sure this is even necessary, as now that I think about
@@ -567,6 +612,10 @@ class TWeakRef(object):
         callback_check = TVar(False)
         callback_check.set(True)
         def actual_callback():
+            # TODO: I think I need a "if callback is not None" check here...
+            # TODO: Also, validate invariants (in a transaction that we
+            # hand-revert) and print a warning to stderr if we've violated any
+            # of them
             if callback_check.get():
                 callback()
         self._callback = actual_callback
@@ -590,8 +639,7 @@ class TWeakRef(object):
             # retry if we get garbage collected) and the check list (so that
             # we'll be checked for consistency again at the end of the
             # transaction).
-            _stm_state.get_base().check_values.add(self)
-            _stm_state.get_base().retry_values.add(self)
+            _stm_state.get_base().read_set.add(self)
             # Then, if we're live, add ourselves to the live list, so that if
             # we later die in the transaction, we'll properly detect an
             # inconsistency
@@ -616,14 +664,14 @@ class TWeakRef(object):
         """
         return self.get()
     
-    def _check_clean(self):
+    def _check_clean(self, transaction):
         """
         Raises _Restart if we're mature, our referent has been garbage
-        collected, and we're in our base transaction's live_weakrefs list
+        collected, and we're in the specified transaction's live_weakrefs list
         (which indicates that we previously read our referent as live during
         this transaction).
         """
-        if self._mature and self._ref() is None and self in _stm_state.get_base().live_weakrefs:
+        if self._mature and self._ref() is None and self in transaction.live_weakrefs:
             # Ref was live during the transaction but has since been
             # dereferenced
             raise _Restart
@@ -863,8 +911,9 @@ def previously(function, toplevel=False):
             return function()
     finally:
         if isinstance(transaction, _BaseTransaction):
-            current.check_values.update(transaction.check_values)
-            current.retry_values.update(transaction.retry_values)
+            # Copy over the read set so that, if the transaction retries, it'll
+            # resume if any of the variables read here change
+            current.read_set.update(transaction.read_set)
             if transaction.resume_at is not None:
                 current.update_resume_at(transaction.resume_at)
         # If it's a nested transaction, it will have already modified our base
