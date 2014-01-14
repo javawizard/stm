@@ -1,0 +1,79 @@
+Yet again I've decided to put my plans for an STM rewrite on hold and focus purely on the specific function I'm wanting to add to the STM system.
+
+So this time it's the track function, which I mentioned in stm-3.txt and stm-3-notes.txt, but I think I'm going to do it a bit different than I wrote there.
+
+So, I'm thinking the function's signature will be track(function, callback). What it will essentially do is "watch" the return value of the specified function and invoke the specified callback whenever the function's value changes. The function's new value will be passed into the callback.
+
+The function and the callback would be run right at the tail end of the transaction in which the changes were made that caused the function's return value to change. The function would be run in its own nested transaction which would then be immediately reverted. The callback wouldn't, so its changes would persist.
+
+So that's my thought so far. The main thing I don't like about it is the separation of logic into two functions, but I can't think of a better way to do it...
+
+I had originally considered just having one function be passed in, and this function would be expected to perform the effects of both the function to watch and the callback. Track would, at that point, essentially be a version of invariant with the modifications-do-not-persist restriction lifted. The problem, though, is that then there's no choice but to watch variables read during what should be the callback for changes, which is a really bad thing to do in a number of situations.
+
+For example, consider a situation where a particular variable is to be watched for changes and an event that prints its new value scheduled on the event loop whenever such changes occur. With the split function/callback approach, this might look something like:
+
+def function():
+    return some_object.some_attribute
+def callback(value):
+    @stm.eventloop.schedule
+    def _():
+        print "some_object.some_attribute just changed to " + str(value)
+track(function, callback)
+
+and that would work just fine. If, on the other hand, the combined function/callback approach were used:
+
+def function():
+    value = some_object.some_attribute
+    @stm.eventloop.schedule
+    def _():
+        print "some_object.some_attribute just changed to " + str(value)
+track(function)
+
+then the STM system would have no choice but to watch all of the vars accessed by stm.eventloop.schedule, such as the event loop's internal queue's internal list's TVar, and run the function whenever any of them changed. Additionally, references to the function would now be held by the event loop (tracking functions would be referred to in exactly the same way as invariants are, namely by the TVars and TWeakRefs that they accessed during their last run; note that the variables accessed by the /callback/ function don't matter here), so the function would never be garbage collected, not even when all other references to some_object are dropped (and, indeed, the function's reference to some_object would be sufficient to keep it alive as well). So there needs to be a way to differentiate reads that matter as far as watching is concerned and reads that are incidental to what's being watched.
+
+Hence I arrive at the two-function idea, which is the best solution I can think of.
+
+So I think I'm going to try implementing that in the existing STM system and see how well it goes.
+
+(And if it does work, it'll make invariant() no longer a primitive: invariant() would, at that point, be no more than a simple wrapper around track() that, in its function part of the function/callback pair, runs the function and checks its return value, and then the callback function would do nothing.)
+
+(Well... That's if I implement it like I'm thinking of implementing it. I might say that the callback isn't guaranteed to be run unless the function's return value actually does change, in which case invariant would need to remain as its own top-level function since it always returns the same value, namely nothing.)
+
+Oh, and, tracked functions/callbacks are recursive in the sense that if the callback makes changes that would affect the function's return value, the function/callback pair is then immediately re-run, and so on and so forth. It would thus be possible to write an infinite loop with something like:
+
+t = TVar(0)
+track(t.get, lambda: t.set(t.get() + 1))
+
+but I think that's permissible for now, in the same sort of vein that a transaction consisting solely of:
+
+retry()
+
+is also permissible and results in a deadlock.
+
+So, we could rename _Invariant to _Tracker. So then we have (like we have with invariants right now) a set of _Trackers on each variable representing the list of trackers (function/callback pairs, in essence) that would need to be notified were that variable to be changed. And each _Tracker would track a (weak) list of the vars that its function (not callback) accessed during its last run.
+
+So, just before we commit any given transaction, we iterate through the list of variables that it /modified/ (not just accessed; only writes count here, and note that this will likely require a change in how we track vars to differentiate between vars that were just read and vars that were just written) and combine their lists of _Tracker instances together. Then we create a new, blank set of _Trackers that were threatened during tracker processing. Then we go through the list of _Trackers that we need to notify and, for each of them, run the function in its own transaction and track which variables it reads. Then we remove the _Tracker instances from the variables it read last time but not this time and add it to the variables it read this time but not last time, and then we set the _Tracker instance's set of variables-the-function-read-last-time to be the new list of variables the function just read.
+
+Then we run the callback, passing in the function's result. We run the callback in its own nested transaction (but, unlike the function, we commit the nested transaction after it's done running), see which vars it wrote, and then add those vars' _Trackers to the blank set of trackers we created.
+
+Then, once we've run through all of the _Trackers, we look at the set of threatened trackers, the one that was blank before we started. If it has any trackers in it, we create a /new/, blank set of trackers in its place, then run all of those trackers as per above. We loop like this over and over again until no trackers were threatened during a run of the previous set of trackers.
+
+Assuming we get to this point without any of the functions or callbacks throwing an exception, we're good to go, so we commit the transaction.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
