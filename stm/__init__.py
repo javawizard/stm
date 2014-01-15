@@ -165,8 +165,8 @@ class _Transaction(object):
         self.proposed_watchers = []
     
     def values_to_check_for_cleanliness(self):
-        return (self.read_set + self.write_set +
-            self.watchers_changed_set + self.watched_vars_changed_set)
+        return (self.read_set | self.write_set |
+            self.watchers_changed_set | self.watched_vars_changed_set)
     
     def load_value(self, var):
         """
@@ -195,6 +195,8 @@ class _Transaction(object):
     
     def get_value(self, var):
         """
+        TODO: Update documentation
+        
         Looks up the value of the specified variable in self.var_cache and
         returns it, or calls self.get_real_value(var) (and then stores it in
         self.var_cache) if the specified variable is not in self.var_cache.
@@ -213,7 +215,7 @@ class _Transaction(object):
             return self.var_cache[var]
         except KeyError:
             self.read_set.add(var)
-            value = self.get_real_value(var)
+            value = self.load_value(var)
             self.var_cache[var] = value
             return value
     
@@ -222,9 +224,6 @@ class _Transaction(object):
         Sets the entry in self.var_cache for the specified variable to the
         specified value.
         """
-        # The logic for loading threatened invariants is in self.get_real_value,
-        # so call self.get_value to load invariants if needed before setting
-        # the var's value.
         self.var_cache[var] = value
         self.write_set.add(var)
     
@@ -257,7 +256,7 @@ class _Transaction(object):
     
     def set_watched_vars(self, watcher, vars):
         self.watched_vars_changed_set.add(watcher)
-        self.watched_vars_cache = vars
+        self.watched_vars_cache[watcher] = vars
     
     def make_previously(self):
         """
@@ -362,13 +361,13 @@ class _BaseTransaction(_Transaction):
                 watcher_transaction = _NestedTransaction(self)
                 with _stm_state.with_current(watcher_transaction):
                     result = watcher.function()
-                newly_watched_vars = watcher_transaction.read_set()
+                newly_watched_vars = watcher_transaction.read_set
                 self.set_watched_vars(watcher, newly_watched_vars)
                 for formerly_watched_var in formerly_watched_vars - newly_watched_vars:
                     # TODO: See if we can avoid the constant set cloning
                     self.set_watchers(formerly_watched_var, self.get_watchers(formerly_watched_var) - set([watcher]))
                 for newly_watched_var in newly_watched_vars - formerly_watched_vars:
-                    self.set_watchers(newly_watched_var, self.get_watchers(newly_watched_var) + set([watcher]))
+                    self.set_watchers(newly_watched_var, self.get_watchers(newly_watched_var) | set([watcher]))
                 callback_transaction = _NestedTransaction(self)
                 with _stm_state.with_current(callback_transaction):
                     watcher.callback(result)
@@ -514,7 +513,7 @@ class _NestedTransaction(_Transaction):
         # TODO: Extract code that runs watchers into a separate function on
         # _Transaction, then call it from here. Then we won't need to copy
         # self.proposed_watchers to self.parent.
-        self.parent.proposed_watchers.append(self.proposed_watchers)
+        self.parent.proposed_watchers.extend(self.proposed_watchers)
         for var in self.watchers_changed_set:
             self.parent.set_watchers(var, self.get_watchers(var))
         for watcher in self.watched_vars_changed_set:
