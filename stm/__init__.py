@@ -146,9 +146,8 @@ class _Transaction(object):
     def __init__(self):
         # Maps vars that we know about to their values
         self.var_cache = {}
-        # Maps vars to sets of the _TrackedFunction instances modifications to
-        # them would threaten. TODO: Should these be weak sets?
-        self.threatened_tracked_functions = {}
+        # Maps vars to watchers watching them
+        self.watchers_cache = {}
         # Vars that were read before they were written, or never written (i.e.
         # not vars that were written first). These are the vars for which
         # load_real_value was called. This set also includes mature TWeakRefs
@@ -157,6 +156,8 @@ class _Transaction(object):
         # Vars that have been written at any point during this transaction.
         # These are the vars for which load_threatened_invariants was called.
         self.write_set = set()
+        self.watchers_changed_set = set() TODO: Load this and so on
+        self.vars_read_by_watchers = {}
     
     def load_real_value(self, var):
         """
@@ -168,7 +169,8 @@ class _Transaction(object):
         """
         raise NotImplementedError
     
-    def load_threatened_tracked_functions(self, var):
+    def load_real_watchers(self, var):
+        # Note that var can be a TVar or a TWeakRefs
         raise NotImplementedError
     
     def run(self, function):
@@ -208,24 +210,29 @@ class _Transaction(object):
         Sets the entry in self.var_cache for the specified variable to the
         specified value.
         """
-#        The logic for loading threatened invariants is in self.get_real_value,
-#        so call self.get_value to load invariants if needed before setting
-#        the var's value.
-        if var not in self.write_set:
-            self.write_set.add(var)
-            # TODO: Might want to see if get_threatened_tracked_functions has
-            # already been called and skip reloading the set of threatened
-            # tracked functions if so
-            self.threatened_tracked_functions[var] = self.load_threatened_tracked_functions(var)
+        # The logic for loading threatened invariants is in self.get_real_value,
+        # so call self.get_value to load invariants if needed before setting
+        # the var's value.
         self.var_cache[var] = value
+        self.write_set.add(var)
     
-    def get_threatened_tracked_functions(self, var):
+    def get_watchers(self, var):
         try:
-            return self.threatened_tracked_functions[var]
+            return self.watchers_cache[var]
         except KeyError:
-            f = self.load_threatened_tracked_functions(var)
-            self.threatened_tracked_functions[var] = f
-            return f
+            # TODO: Do we need to add this var to watchers_changed_set if we're
+            # just reading it? We might, if just for the sake of validating
+            # that the var's watchers haven't changed since the transaction
+            # started, although we might only need to worry about this for vars
+            # in the write set...
+            self.watchers_changed_set.add(var)
+            w = self.load_real_watchers(var)
+            self.watchers_cache[var] = w
+            return w
+    
+    def set_watchers(self, var, watchers):
+        self.watchers_changed_set.add(var)
+        self.watchers_cache[var] = watchers
     
     def make_previously(self):
         """
@@ -263,11 +270,16 @@ class _BaseTransaction(_Transaction):
         self.next_start_time = current_start_time
         self.created_weakrefs = set()
         self.live_weakrefs = set()
-        self.proposed_tracked_functions = []
+        self.proposed_watchers = []
         self.resume_at = None
         # Store off the transaction id we're starting at, so that we know if
         # things have changed since we started.
         if not start:
+            # TODO: Do we need to lock here? Probably, because if we're running
+            # on, say, Jython and we don't, we might see a slightly outdated
+            # value here... But I need to think about that and make sure that
+            # that could really screw up the STM system that badly as opposed
+            # to, say, just causing a transaction to be needlessly re-run.
             with _global_lock:
                 start = _last_transaction
         self.start = start
@@ -282,12 +294,13 @@ class _BaseTransaction(_Transaction):
             var._check_clean(self)
             return var._real_value
     
-    def load_threatened_tracked_functions(self, var):
+    def load_real_watchers(self, var):
+        # Note that var can be a TVar or a TWeakRef
         with _global_lock:
             var._check_clean(self)
             # Duplicate the set so that later modifications to the original
             # don't screw us up. TODO: Consider using a WeakSet here
-            return set(var._tracked_functions)
+            return set(var._watchers)
     
     def run(self, function):
         try:
@@ -303,8 +316,16 @@ class _BaseTransaction(_Transaction):
     
     def commit(self):
         global _last_transaction
+        last_vars_read_by_each_watcher = {}
         # _TrackedFunctions -> Sets of vars /read/ by the /tracked function/'s
         # most recent run.
+        watchers_to_run = set()
+        for var in self.write_set:
+            watchers_to_run.update(self.get_watchers(var))
+        for watcher in watchers_to_run:
+            
+        
+        
         tracked_function_reads = {}
         threatened_tracked_functions = set()
         for tf in self.threatened_tracked_functions.itervalues():
@@ -376,7 +397,8 @@ class _BaseTransaction(_Transaction):
             # set. Note that TVar._update_real_value takes care of notifying
             # the TVar's events for us.
             for var, value in self.write_set:
-                var._update_real_value(value, modified)
+                var._update_real_value(value)
+                var._modified = modified
             # Then we update all of the invariants we ran.
             for invariant, var_set in invariant_reads.iteritems():
                 new_dependencies = var_set - invariant.dependencies
@@ -492,7 +514,7 @@ class _NestedTransaction(_Transaction):
         return _NestedTransaction(self.parent)
 
 
-class _TrackedFunction(object):
+class _Watcher(object):
     """
     A transactional invariant.
     
@@ -504,28 +526,18 @@ class _TrackedFunction(object):
     last run. I'll be changing this soon.)
     """
     def __init__(self, function, callback):
-        # The function being tracked
+        # The watcher function itself
         self.function = function
         # The callback to invoke with the function's result
         self.callback = callback
-        # The last transaction during which this tracked function was run, and
-        # hence the last transaction in which self.dependencies was modified
-        self.modified = 0
-        # The set of TVars and TWeakRefs that the tracked function accessed
-        # during its last run.
+        # The set of TVars and TWeakRefs that the watcher is watching, i.e. the
+        # vars that it accessed on its last run in the last transaction in
+        # which it was run.
         # We don't need to keep around vars that can't be referenced by
         # anything else: if they're garbage collected, then the tracked
         # function itself wouldn't have been able to access them during its
         # next run, so we don't care about them.
         self.dependencies = weakref_module.WeakSet()
-    
-    def _check_clean(self, transaction):
-        # Check to see if this tracked function has been run (and
-        # self.dependencies modified) since the specified transaction started.
-        # As with all _check_clean methods, this must only be called with the
-        # global lock held.
-        if self.modified > transaction.start:
-            raise _Restart
 
 
 class TVar(object):
@@ -539,20 +551,22 @@ class TVar(object):
     More complex datatypes (such as TList, TDict, and TObject) are available in
     stm.datatypes.
     """
-    __slots__ = ["_events", "_real_value", "_modified", "_invariants",
+    __slots__ = ["_events", "_real_value", "_modified", "_watchers",
                  "__weakref__"]
     
     def __init__(self, value=None):
         """
         Create a TVar with the specified initial value.
         """
+        # TODO: Sets are expensive things (~232 bytes), much more expensive
+        # than TVars (~88 bytes). We should set self._events and self._watchers
+        # to None whenever they don't contain anything to save on space.
         self._events = set()
         self._real_value = value
         self._modified = 0
-        # Set of _TrackedFunction objects that accessed this TVar during their
-        # last run, and that therefore need to be re-run when this TVar is
-        # modified
-        self._tracked_functions = set()
+        # Set of _Watcher objects that accessed this TVar during their last
+        # run, and that therefore need to be re-run when this TVar is modified
+        self._watchers = set()
     
     def get(self):
         """
@@ -589,11 +603,10 @@ class TVar(object):
     def _remove_retry_event(self, e):
         self._events.remove(e)
     
-    def _update_real_value(self, value, modified):
+    def _update_real_value(self, value):
         # NOTE: This is always called while the global lock is acquired
-        # Update our real value and modified transaction
+        # Update our real value.
         self._real_value = value
-        self._modified = modified
         # Then notify all of the events registered to us.
         for e in self._events:
             e.set()
@@ -636,6 +649,9 @@ class TWeakRef(object):
         This allows classes like TMutableWeakRef to permit their value to be
         set to None as needed.
         """
+        # TODO: Same note as on TVar._events about replacing the sets with None
+        # when they don't contain anything. We should also consider setting a
+        # __slots__ on TWeakRef.
         self._events = set()
         self._mature = False
         # We hold a strong reference to our value initially; this is later
@@ -643,7 +659,7 @@ class TWeakRef(object):
         # the transaction creating this TWeakRef commits. See _make_mature's
         # docstring for why we do this.
         self._ref = value
-        self._tracked_functions = set()
+        self._watchers = set()
         # Use the TVar hack we previously mentioned in the docstring for
         # ensuring that the callback is only run if we commit. TODO: Double
         # check to make sure this is even necessary, as now that I think about

@@ -70,6 +70,12 @@ So you know what, I think I'm going to go convert the STM system to use distinct
 
 
 
+So I decided to just go ahead and do the whole thing, and I also decided to rename "track" to "watch", which I think will better reflect what it's intended to do.
+
+And it gives rise to the name "Watcher" for the class that's replacing _Invariant.
+
+
+
 
 
 
