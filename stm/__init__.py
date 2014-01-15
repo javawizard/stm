@@ -148,6 +148,8 @@ class _Transaction(object):
         self.var_cache = {}
         # Maps vars to watchers watching them
         self.watchers_cache = {}
+        # Maps watchers to vars they read during their last run
+        self.watched_vars_cache = {}
         # Vars that were read before they were written, or never written (i.e.
         # not vars that were written first). These are the vars for which
         # load_real_value was called. This set also includes mature TWeakRefs
@@ -156,10 +158,17 @@ class _Transaction(object):
         # Vars that have been written at any point during this transaction.
         # These are the vars for which load_threatened_invariants was called.
         self.write_set = set()
-        self.watchers_changed_set = set() TODO: Load this and so on
-        self.vars_read_by_watchers = {}
+        # Sets of vars whose _watchers have been read/written
+        self.watchers_changed_set = set()
+        # Sets of watchers whose watched_vars have been read/written
+        self.watched_vars_changed_set = set()
+        self.proposed_watchers = []
     
-    def load_real_value(self, var):
+    def values_to_check_for_cleanliness(self):
+        return (self.read_set + self.write_set +
+            self.watchers_changed_set + self.watched_vars_changed_set)
+    
+    def load_value(self, var):
         """
         Returns the real value of the specified variable, possibly throwing
         _Restart if the variable has been modified since this transaction
@@ -169,8 +178,11 @@ class _Transaction(object):
         """
         raise NotImplementedError
     
-    def load_real_watchers(self, var):
+    def load_watchers(self, var):
         # Note that var can be a TVar or a TWeakRefs
+        raise NotImplementedError
+    
+    def load_watched_vars(self, watcher):
         raise NotImplementedError
     
     def run(self, function):
@@ -226,13 +238,26 @@ class _Transaction(object):
             # started, although we might only need to worry about this for vars
             # in the write set...
             self.watchers_changed_set.add(var)
-            w = self.load_real_watchers(var)
+            w = self.load_watchers(var)
             self.watchers_cache[var] = w
             return w
     
     def set_watchers(self, var, watchers):
         self.watchers_changed_set.add(var)
         self.watchers_cache[var] = watchers
+    
+    def get_watched_vars(self, watcher):
+        try:
+            return self.watched_vars_cache[watcher]
+        except KeyError:
+            self.watched_vars_changed_set.add(watcher)
+            v = self.load_watched_vars(watcher)
+            self.watched_vars_cache[watcher] = v
+            return v
+    
+    def set_watched_vars(self, watcher, vars):
+        self.watched_vars_changed_set.add(watcher)
+        self.watched_vars_cache = vars
     
     def make_previously(self):
         """
@@ -270,7 +295,6 @@ class _BaseTransaction(_Transaction):
         self.next_start_time = current_start_time
         self.created_weakrefs = set()
         self.live_weakrefs = set()
-        self.proposed_watchers = []
         self.resume_at = None
         # Store off the transaction id we're starting at, so that we know if
         # things have changed since we started.
@@ -287,20 +311,25 @@ class _BaseTransaction(_Transaction):
     def get_base_transaction(self):
         return self
     
-    def load_real_value(self, var):
+    def load_value(self, var):
         # Just check to make sure the variable hasn't been modified since we
         # started (and raise _Restart if it has), then return its real value.
         with _global_lock:
             var._check_clean(self)
             return var._real_value
     
-    def load_real_watchers(self, var):
+    def load_watchers(self, var):
         # Note that var can be a TVar or a TWeakRef
         with _global_lock:
             var._check_clean(self)
             # Duplicate the set so that later modifications to the original
             # don't screw us up. TODO: Consider using a WeakSet here
             return set(var._watchers)
+    
+    def load_watched_vars(self, watcher):
+        with _global_lock:
+            watcher._check_clean(self)
+            return set(watcher.watched_vars)
     
     def run(self, function):
         try:
@@ -316,99 +345,68 @@ class _BaseTransaction(_Transaction):
     
     def commit(self):
         global _last_transaction
-        last_vars_read_by_each_watcher = {}
-        # _TrackedFunctions -> Sets of vars /read/ by the /tracked function/'s
-        # most recent run.
+        
         watchers_to_run = set()
         for var in self.write_set:
             watchers_to_run.update(self.get_watchers(var))
-        for watcher in watchers_to_run:
-            
-        
-        
-        tracked_function_reads = {}
-        threatened_tracked_functions = set()
-        for tf in self.threatened_tracked_functions.itervalues():
-            threatened_tracked_functions.update(tf)
-        while threatened_tracked_functions:
-            newly_threatened_functions = set()
-            for tracked_function in threatened_tracked_functions:
-                function_transaction = _NestedTransaction(self)
-                with _stm_state.with_current(function_transaction):
-                    result = tracked_function.function()
-                tracked_function_reads[tracked_function] = function_transaction.read_set
+        # Run all of the proposals here, and blank out the list of
+        # proposals since we're turning them into entries on
+        # watchers_changed and watched_vars_changed
+        watchers_to_run.update(set(self.proposed_watchers))
+        self.proposed_watchers = []
+
+        new_watchers_to_run = set()
+        while watchers_to_run:
+            for watcher in watchers_to_run:
+                formerly_watched_vars = self.get_watched_vars(watcher)
+                watcher_transaction = _NestedTransaction(self)
+                with _stm_state.with_current(watcher_transaction):
+                    result = watcher.function()
+                newly_watched_vars = watcher_transaction.read_set()
+                self.set_watched_vars(watcher, newly_watched_vars)
+                for formerly_watched_var in formerly_watched_vars - newly_watched_vars:
+                    # TODO: See if we can avoid the constant set cloning
+                    self.set_watchers(formerly_watched_var, self.get_watchers(formerly_watched_var) - set([watcher]))
+                for newly_watched_var in newly_watched_vars - formerly_watched_vars:
+                    self.set_watchers(newly_watched_var, self.get_watchers(newly_watched_var) + set([watcher]))
                 callback_transaction = _NestedTransaction(self)
                 with _stm_state.with_current(callback_transaction):
-                    tracked_function.callback(result)
+                    watcher.callback(result)
                 callback_transaction.commit()
-                for tf in callback_transaction.threatened_tracked_functions.itervalues():
-                    newly_threatened_functions.update(tf)
-                PICK UP HERE. Need to decide which tracked functions to re-run
-                based on the vars read by the last run, so we probably need to
-                keep a separate map (like everywhere else) of vars to functions
-                they threaten. This is starting to get a bit nontrivial.
-        # First, we need to check invariants proposed during this
-        # transaction and invariants threatened by variable accesses during
-        # this transaction for consistency. We'll handle the former first.
-        invariant_reads = {}
-        # We used to make a copy of self.threatened_invariants here, but the
-        # invariant loading logic has now been changed to only load invariants
-        # for vars when they're written, so threatened_invariants won't be
-        # modified while we're iterating.
-        for invariant in self.threatened_invariants.copy():
-            # Create a nested transaction in which to run this invariant.
-            # This will ensure that side effects of running the invariant
-            # (including registering other invariants) aren't persisted.
-            invariant_transaction = _NestedTransaction(self)
-            with _stm_state.with_current(invariant_transaction):
-                # If the invariant aborts, requests a restart, or retries, the
-                # request should be passed along, so we don't need to catch any
-                # exceptions here.
-                invariant.check_invariant()
-            # Now store off the list of variables that the invariant read.
-            invariant_reads[invariant] = invariant_transaction.read_set
-        # Now we check proposed invariants for consistency. Invariants
-        # proposed in the invariants themselves won't be persisted, so we
-        # don't need to copy self.proposed_invariants like we used to with
-        # self.threatened_invariants.
-        for function in self.proposed_invariants:
-            invariant_transaction = _NestedTransaction(self)
-            with _stm_state.with_current(invariant_transaction):
-                new_invariant = _Invariant(function)
-                new_invariant.check_invariant()
-            invariant_reads[new_invariant] = invariant_transaction.read_set
-        # All invariants were consistent. Now we acquire the global lock.
+                for var in callback_transaction.write_set:
+                    new_watchers_to_run.update(self.get_watchers(var))
+            watchers_to_run = new_watchers_to_run
+            # Copy in any new proposals made during callback runs
+            watchers_to_run.update(set(self.proposed_watchers))
+            self.proposed_watchers = []
+        
         with _global_lock:
             # Now we make sure nothing we read or modified changed since this
             # transaction started. This will take care of making sure that
             # none of our TWeakRefs that we read as alive have since been
             # garbage collected.
-            for item in self.read_set + self.write_set:
+            for item in self.values_to_check_for_cleanliness():
                 item._check_clean(self)
-            # We also check our invariants to make sure none of them changed
-            # since this transaction started.
-            for invariant in invariant_reads:
-                invariant._check_clean(self)
             # Nothing changed, so we're good to commit. First we make
             # ourselves a new id.
             _last_transaction += 1
             modified = _last_transaction
             # Then we update the real values of all of the TVars in the write
-            # set. Note that TVar._update_real_value takes care of notifying
-            # the TVar's events for us.
-            for var, value in self.write_set:
-                var._update_real_value(value)
+            # set.
+            for var in self.write_set:
+                var._update_real_value(self.get_value(var))
                 var._modified = modified
-            # Then we update all of the invariants we ran.
-            for invariant, var_set in invariant_reads.iteritems():
-                new_dependencies = var_set - invariant.dependencies
-                old_dependencies = invariant.dependencies - var_set
-                for var in old_dependencies:
-                    var._invariants.discard(invariant)
-                for var in new_dependencies:
-                    var._invariants.add(invariant)
-                invariant.dependencies = var_set
-                invariant.modified = modified
+            
+            for var in self.watchers_changed_set:
+                var._watchers = self.get_watchers(var)
+                var._modified = modified
+            
+            for watcher in self.watched_vars_changed_set:
+                # Make them equal without creating a new WeakSet
+                watcher.watched_vars.intersection_update(self.get_watched_vars(watcher))
+                watcher.watched_vars.update(self.get_watched_vars(watcher))
+                watcher._modified = modified
+            
             # And then we tell all TWeakRefs created during this
             # transaction to mature
             for ref in self.created_weakrefs:
@@ -428,7 +426,7 @@ class _BaseTransaction(_Transaction):
         # (I think) we'll already be notified by whatever var or ref we
         # accessed the var in question through...
         with _global_lock:
-            for item in self.read_set + self.write_set:
+            for item in self.values_to_check_for_cleanliness():
                 item._check_clean()
             # Nope, none of them have changed. So now we create an event,
             # then add it to all of the vars we've read.
@@ -492,12 +490,15 @@ class _NestedTransaction(_Transaction):
     def get_base_transaction(self):
         return self.parent.get_base_transaction()
     
-    def load_real_value(self, var):
+    def load_value(self, var):
         # Just get the value from our parent.
         return self.parent.get_value(var)
     
-    def load_threatened_tracked_functions(self, var):
-        return self.parent.get_threatened_tracked_functions(var)
+    def load_watchers(self, var):
+        return self.parent.get_watchers(var)
+    
+    def load_watched_vars(self, watcher):
+        return self.parent.get_watched_vars(watcher)
     
     def run(self, function):
         # Run the function, then (if it didn't throw any exceptions; _Restart,
@@ -509,6 +510,15 @@ class _NestedTransaction(_Transaction):
     def commit(self):
         for var in self.write_set:
             self.parent.set_value(var, self.var_cache[var])
+        
+        # TODO: Extract code that runs watchers into a separate function on
+        # _Transaction, then call it from here. Then we won't need to copy
+        # self.proposed_watchers to self.parent.
+        self.parent.proposed_watchers.append(self.proposed_watchers)
+        for var in self.watchers_changed_set:
+            self.parent.set_watchers(var, self.get_watchers(var))
+        for watcher in self.watched_vars_changed_set:
+            self.parent.set_watched_vars(watcher, self.get_watched_vars(watcher))
     
     def make_previously(self):
         return _NestedTransaction(self.parent)
@@ -530,6 +540,7 @@ class _Watcher(object):
         self.function = function
         # The callback to invoke with the function's result
         self.callback = callback
+        self._modified = 0
         # The set of TVars and TWeakRefs that the watcher is watching, i.e. the
         # vars that it accessed on its last run in the last transaction in
         # which it was run.
@@ -537,7 +548,11 @@ class _Watcher(object):
         # anything else: if they're garbage collected, then the tracked
         # function itself wouldn't have been able to access them during its
         # next run, so we don't care about them.
-        self.dependencies = weakref_module.WeakSet()
+        self.watched_vars = weakref_module.WeakSet()
+
+    def _check_clean(self, transaction):
+        if self._modified > transaction.start:
+            raise _Restart
 
 
 class TVar(object):
@@ -976,27 +991,17 @@ def previously(function, toplevel=False):
         # anything else.
 
 
-def invariant(function):
+def watch(function, callback):
     """
-    (This function is highly experimental and is not yet complete: invariants
-    cannot be proposed in a nested transaction yet.)
+    (This function is highly experimental and should not yet be used.)
     
-    Provides support for transactional invariants.
-    
-    This function is called to propose a new invariant. The passed-in function
-    must succeed now, at the end of the current transaction, and at the end of
-    every subsequent transaction. If it fails at the end of any transaction,
-    that transaction will be immediately aborted, and the exception raised by
-    the invariant propagated.
-    
-    To succeed, a function must return either None or True. It can indicate
-    failure either by returning False or by raising an exception. This allows
-    both invariants that signal failure by raising an exception and invariants
-    that signal success/failure by returning the value of a simple boolean
-    expression.
+    A function that generalizes the previous behavior of invariant() to allow
+    side effects in a separate callback function when necessary. More
+    documentation to come soon. invariant() will shortly be rewritten as a thin
+    wrapper around this function.
     """
     # FIXME: Run the invariant first to make sure that it passes right now
-    _stm_state.get_base().proposed_invariants.append(function)
+    _stm_state.get_current().proposed_watchers.append(_Watcher(function, callback))
 
 
 
