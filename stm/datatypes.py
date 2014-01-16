@@ -526,6 +526,38 @@ class BroadcastEndpoint(TObject):
         return self.duplicate()
 
 
+class TPossiblyWeakRef(object):
+    """
+    A wrapper around TWeakRef that allows holding references to objects to
+    which weak references aren't allowed (such as strings or None). References
+    to such objects are held strongly (and the callback associated with the
+    given TPossiblyWeakRef never invoked); all others are held as weak
+    references.
+    """
+    def __init__(self, value=None, callback=None):
+        try:
+            self._value = stm.TWeakRef(value, callback)
+            self._weak = True
+        except TypeError: # Value not weakrefable
+            self._value = value
+            self._weak = False
+    
+    def get(self):
+        if self._weak:
+            return self._value.get()
+        else:
+            return self._value
+    
+    value = property(get)
+    
+    @property
+    def is_alive(self):
+        if self._weak:
+            return self._value.is_alive
+        else:
+            return True
+
+
 class TMutableWeakRef(TObject):
     """
     (This class is experimental.)
