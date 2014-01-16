@@ -12,7 +12,7 @@ pool = ThreadPool(5, 3)
 @changes_only_according_to(operator.eq)
 @scheduled_function
 def _((scheduled, finished, live, free)):
-    print "{0} scheduled, {1} finished, {2} live, {3} free".format(scheduled, finished, live, free)
+    print "{0} scheduled, {1} finished, {2} threads live, {3} free".format(scheduled, finished, live, free)
 
 def task():
     time.sleep(random.random() + 0.5)
