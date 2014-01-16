@@ -1,5 +1,6 @@
  
 import stm
+import stm.datatypes
 import functools
 from stm.timeout import Timeout
 
@@ -46,6 +47,43 @@ def wait_until(function, timeout_after=None, timeout_at=None):
             stm.retry(timeout_after, timeout_at)
             raise Timeout
 
+
+def changes_only(callback):
+    last = stm.atomically(lambda: stm.TVar(None))
+    @functools.wraps(callback)
+    def actual_callback(result):
+        if last.value is None or last.value.value is not result:
+            last.value = stm.datatypes.TPossiblyWeakRef(result)
+            callback(result)
+    return actual_callback
+
+
+def watcher(function):
+    """
+    A decorator that decorates a callback and is passed a function to watch.
+    It wraps the callback with a function that, when called, registers a watch
+    with stm.watch(function, callback).
+    
+    This is mainly useful as part of a stack of decorators registering a watch
+    from outside of a transaction. For example::
+    
+        @stm.atomically
+        @watcher(some_tvar.get)
+        def _(value):
+            ...do something...
+    
+    is equivalent to::
+    
+        @stm.atomically
+        def _():
+            def callback(value):
+                ...do something...
+            stm.watch(some_tvar.get, callback)
+    """
+    def decorator(callback):
+        @functools.wraps(function)
+        def wrapper():
+            stm.watch(function, callback)
 
 
 
