@@ -20,6 +20,7 @@ class EventLoop(object):
         @functools.wraps(function)
         def wrapper(*args, **kwargs):
             self.schedule(functools.partial(function, *args, **kwargs))
+        return wrapper
     
     def stop(self):
         # In or out of STM
