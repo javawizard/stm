@@ -15,10 +15,17 @@ def _((scheduled, finished)):
     print "{0} scheduled, {1} finished".format(scheduled, finished)
 
 def task():
-    time.sleep((random.random()) + 0.3)
+    time.sleep(1)
 
 for _ in range(40):
     pool.schedule(task)
-    time.sleep(0.03)
 
 pool.join()
+
+# Sleep a bit to let the eventloop process our final progress message. This
+# won't be necessary once I add an atexit hook to stm.eventloop to wait until
+# all events have been processed before shutting down.
+# 
+# Also, TODO: Figure out why ThreadPool's keep_alive isn't keeping threads
+# (and thus this script) alive for 3 seconds after we join...
+time.sleep(0.5)
