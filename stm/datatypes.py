@@ -541,6 +541,8 @@ class TMutableWeakRef(TObject):
     be called on garbage collection of any of its former values.
     """
     def __init__(self, value=None, callback=None):
+        # TODO: This needs fixing since 1: TWeakRef no longer wraps None
+        # values and 2: self._ref needs to be set somewhere before self.set
         """
         Create a TMutableWeakRef with the specified initial value, which
         defaults to None.
