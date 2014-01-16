@@ -8,14 +8,14 @@ import time
 
 pool = ThreadPool(5, 3)
 
-@atomically_watch(lambda: (pool.tasks_scheduled, pool.tasks_finished))
+@atomically_watch(lambda: (pool.tasks_scheduled, pool.tasks_finished, pool._live_threads, pool._free_threads))
 @changes_only_according_to(operator.eq)
 @scheduled_function
-def _((scheduled, finished)):
-    print "{0} scheduled, {1} finished".format(scheduled, finished)
+def _((scheduled, finished, live, free)):
+    print "{0} scheduled, {1} finished, {2} live, {3} free".format(scheduled, finished, live, free)
 
 def task():
-    time.sleep(1)
+    time.sleep(random.random() + 0.5)
 
 for _ in range(40):
     pool.schedule(task)
