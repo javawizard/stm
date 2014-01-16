@@ -3,6 +3,7 @@ from stm.datatypes import BroadcastQueue
 import stm
 from threading import Thread
 import traceback
+import functools
 
 class EventLoop(object):
     def __init__(self):
@@ -14,6 +15,11 @@ class EventLoop(object):
         if function is None:
             raise ValueError("function cannot be None")
         stm.atomically(lambda: self._queue.put(function))
+    
+    def scheduled_function(self, function):
+        @functools.wraps(function)
+        def wrapper(*args, **kwargs):
+            self.schedule(functools.partial(function, *args, **kwargs))
     
     def stop(self):
         # In or out of STM
@@ -62,6 +68,10 @@ def schedule(function):
     (or make use of a stm.threadutils.ThreadPool) to do their work.
     """
     default_event_loop.schedule(function)
+
+
+def scheduled_function(function):
+    return default_event_loop.scheduled_function(function)
 
 
 
