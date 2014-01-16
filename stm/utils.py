@@ -69,11 +69,6 @@ def changes_only_according_to(predicate):
     """
     A variant of changes_only that allows specifying the function used to test
     values for equality.
-    
-    By default, changes_only uses identity-wise comparison (i.e. the "is"
-    operator) to compare values. This function can be used to indicate an
-    alternative comparison predicate; operator.eq (or lambda a, b: a == b)
-    could be used to test for equality with Python's == operator.
     """
     def decorator(callback):
         last = stm.atomically(lambda: stm.TVar((False, None)))
