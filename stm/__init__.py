@@ -426,7 +426,7 @@ class _BaseTransaction(_Transaction):
         # accessed the var in question through...
         with _global_lock:
             for item in self.values_to_check_for_cleanliness():
-                item._check_clean()
+                item._check_clean(self)
             # Nope, none of them have changed. So now we create an event,
             # then add it to all of the vars we've read.
             e = _Event()
