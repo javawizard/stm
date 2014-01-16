@@ -142,7 +142,19 @@ class ThreadPool(stm.datatypes.TObject):
         that given to stm.utils.wait_until) after which join() will give up
         and raise stm.timeout.Timeout.
         """
-        stm.utils.wait_until(lambda: self._tasks_scheduled == self._tasks_finished, timeout_after, timeout_at)
+        stm.utils.wait_until(lambda: self.tasks_remaining == 0, timeout_after, timeout_at)
+    
+    @property
+    def tasks_scheduled(self):
+        return self._tasks_scheduled
+    
+    @property
+    def tasks_finished(self):
+        return self._tasks_finished
+    
+    @property
+    def tasks_remaining(self):
+        return self._tasks_scheduled - self._tasks_finished
     
     def _thread_run(self):
         while True:
