@@ -982,7 +982,7 @@ def previously(function, toplevel=False):
         # anything else.
 
 
-def watch(function, callback):
+def watch(function, callback=None):
     """
     (This function is highly experimental and should not yet be used.)
     
@@ -990,7 +990,15 @@ def watch(function, callback):
     side effects in a separate callback function when necessary. More
     documentation to come soon. invariant() will shortly be rewritten as a thin
     wrapper around this function.
+    
+    If callback is None, then a function is returned such that
+    watch(function)(callback) is equivalent to watch(function, callback). This
+    allows watch to be used as a decorator.
     """
+    if callback is None:
+        def decorator(actual_callback):
+            watch(function, actual_callback)
+        return decorator
     # FIXME: Run the invariant first to make sure that it passes right now
     _stm_state.get_current().proposed_watchers.append(_Watcher(function, callback))
 
