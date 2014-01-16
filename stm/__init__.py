@@ -655,24 +655,14 @@ class TWeakRef(object):
     def __init__(self, value, callback=None):
         """
         Create a new weak reference pointing to the specified value.
-        
-        Unlike ordinary Python weak references, instances of this class can
-        hold "weak references to None"; such references always appear alive (as
-        one might expect; by virtue of None's status as a builtin, it is never
-        garbage collected), and the passed-in callback will never be invoked.
-        This allows classes like TMutableWeakRef to permit their value to be
-        set to None as needed.
         """
         # TODO: Same note as on TVar._events about replacing the sets with None
         # when they don't contain anything. We should also consider setting a
         # __slots__ on TWeakRef.
         self._events = set()
         self._mature = False
-        # We hold a strong reference to our value initially; this is later
-        # converted to a proper weak reference in self._make_mature just after
-        # the transaction creating this TWeakRef commits. See _make_mature's
-        # docstring for why we do this.
-        self._ref = value
+        self._weak_ref = weakref_module.ref(value, self._on_value_dead)
+        self._strong_ref = value
         self._watchers = set()
         # Use the TVar hack we previously mentioned in the docstring for
         # ensuring that the callback is only run if we commit. TODO: Double
@@ -696,7 +686,7 @@ class TWeakRef(object):
         transaction.
         """
         if self._mature:
-            value = self._ref()
+            value = self._weak_ref()
             if value is None and self in _stm_state.get_base().live_weakrefs:
                 # Ref was live at some point during the past transaction but
                 # isn't anymore
@@ -717,7 +707,7 @@ class TWeakRef(object):
             # We were just created during this transaction, so we haven't
             # matured (and had our ref wrapped in an actual weak reference), so
             # return our value.
-            return self._ref
+            return self._strong_ref
     
     value = property(get, doc="""A property wrapper around self.get.
     
@@ -729,6 +719,10 @@ class TWeakRef(object):
         weakref.ref class.
         """
         return self.get()
+    
+    @property
+    def is_alive(self):
+        return self.get() is not None
     
     def _check_clean(self, transaction):
         """
@@ -757,11 +751,8 @@ class TWeakRef(object):
         transaction and causing a restart as a result, which would result in an
         infinite restart loop.
         """
-        # If our value is None, don't mature ourselves.
-        if self._ref is None:
-            return
         self._mature = True
-        self._ref = weakref_module.ref(self._ref, self._on_value_dead)
+        self._strong_ref = None
     
     def _on_value_dead(self, ref):
         """
