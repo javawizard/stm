@@ -664,18 +664,19 @@ class TWeakRef(object):
         self._weak_ref = weakref_module.ref(value, self._on_value_dead)
         self._strong_ref = value
         self._watchers = set()
-        # Use the TVar hack we previously mentioned in the docstring for
-        # ensuring that the callback is only run if we commit. TODO: Double
-        # check to make sure this is even necessary, as now that I think about
-        # it we only create the underlying weakref when we commit, so we might
-        # already be good to go.
-        callback_check = TVar(False)
-        callback_check.set(True)
-        def actual_callback():
-            if callback_check.get():
-                callback()
-        self._callback = actual_callback
+        # We used to use a hack involving a TVar and a wrapper callback to
+        # ensure that the callback was never invoked if the transaction in
+        # which this TWeakRef was created never committed, but with recent
+        # changes to how TWeakRef tracks weak references, this is no longer
+        # necessary.
+        self.callback = callback
         _stm_state.get_base().created_weakrefs.add(self)
+        # TODO: Note in TWeakRef's documentation that TWeakRefs don't become
+        # weak until the transaction creating them commits, so if they're
+        # allowed to escape their creating transactions, they'll act like
+        # strong references. Also consider changing that behavior so that they
+        # become weak even if the transaction creating them doesn't commit, but
+        # make sure not to invoke their callback in such a case.
     
     def get(self):
         """
