@@ -732,7 +732,7 @@ class TWeakRef(object):
         (which indicates that we previously read our referent as live during
         this transaction).
         """
-        if self._mature and self._ref() is None and self in transaction.live_weakrefs:
+        if self._mature and self._weak_ref() is None and self in transaction.live_weakrefs:
             # Ref was live during the transaction but has since been
             # dereferenced
             raise _Restart
