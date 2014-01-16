@@ -2,6 +2,7 @@
 import stm
 import stm.datatypes
 import functools
+import operator
 from stm.timeout import Timeout
 
 def atomic_function(function):
@@ -51,22 +52,39 @@ def wait_until(function, timeout_after=None, timeout_at=None):
 def changes_only(callback):
     """
     A decorator that can be used to decorate callbacks that are to be passed to
-    stm.watch. It wraps the callback with a function that only invokes the
-    callback if the value passed to it is different from that passed to the
-    last invocation of the callback.
+    stm.watch to filter out duplicate invocations with the same result value.
     
-    Note that the wrapper function attempts to store a weak reference to the
-    last result passed into the callback but falls back to holding a strong
-    reference if the value in question is of a type that does not support
-    weak references (strings, for example).
+    Note that the resulting callback will keep a reference around to the last
+    value with which it was called, so make sure you're not counting on this
+    value's being garbage collected immediately after the callback is invoked.
+    
+    By default, the "is" operator is used to compare each value with the one
+    passed in previously. If you need another operator (for example,
+    operator.eq) to be used, have a look at changes_only_according_to().
     """
-    last = stm.atomically(lambda: stm.TVar(None))
-    @functools.wraps(callback)
-    def actual_callback(result):
-        if last.value is None or last.value.value is not result:
-            last.value = stm.datatypes.TPossiblyWeakRef(result)
-            callback(result)
-    return actual_callback
+    return changes_only_according_to(operator.is_)(callback)
+
+
+def changes_only_according_to(predicate):
+    """
+    A variant of changes_only that allows specifying the function used to test
+    values for equality.
+    
+    By default, changes_only uses identity-wise comparison (i.e. the "is"
+    operator) to compare values. This function can be used to indicate an
+    alternative comparison predicate; operator.eq (or lambda a, b: a == b)
+    could be used to test for equality with Python's == operator.
+    """
+    def decorator(callback):
+        last = stm.atomically(lambda: stm.TVar((False, None)))
+        @functools.wraps(callback)
+        def actual_callback(result):
+            has_run, last_value = last.value
+            if not has_run or not predicate(last_value, result):
+                last.value = True, result
+                callback(result)
+        return actual_callback
+    return decorator
 
 
 def atomically_watch(function, callback=None):
