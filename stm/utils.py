@@ -49,6 +49,17 @@ def wait_until(function, timeout_after=None, timeout_at=None):
 
 
 def changes_only(callback):
+    """
+    A decorator that can be used to decorate callbacks that are to be passed to
+    stm.watch. It wraps the callback with a function that only invokes the
+    callback if the value passed to it is different from that passed to the
+    last invocation of the callback.
+    
+    Note that the wrapper function attempts to store a weak reference to the
+    last result passed into the callback but falls back to holding a strong
+    reference if the value in question is of a type that does not support
+    weak references (strings, for example).
+    """
     last = stm.atomically(lambda: stm.TVar(None))
     @functools.wraps(callback)
     def actual_callback(result):
@@ -58,32 +69,45 @@ def changes_only(callback):
     return actual_callback
 
 
-def watcher(function):
+def atomically_watch(function, callback=None):
     """
-    A decorator that decorates a callback and is passed a function to watch.
-    It wraps the callback with a function that, when called, registers a watch
-    with stm.watch(function, callback).
+    A wrapper around stm.watch that automatically runs the call inside a
+    transaction. This is essentially equivalent to::
     
-    This is mainly useful as part of a stack of decorators registering a watch
-    from outside of a transaction. For example::
+        stm.atomically(lambda: stm.watch(function, callback))
     
-        @stm.atomically
-        @watcher(some_tvar.get)
-        def _(value):
+    but, as with stm.watch, atomically_watch can be used as a decorator by
+    omitting the callback parameter. For example, the following could be used
+    outside of a transaction to place a new watch::
+    
+        @atomically_watch(some_tvar.get)
+        def _(result):
             ...do something...
     
-    is equivalent to::
+    This would be equivalent to:
     
         @stm.atomically
         def _():
-            def callback(value):
-                ...do something...
-            stm.watch(some_tvar.get, callback)
+            @stm.watch(some_tvar.get)
+            def _(result):
+                ..do something..
+    
+    Note that the callback will (as callbacks always are) still be run inside
+    a transaction. If you need to perform I/O in the callback, use
+    stm.eventloop.scheduled_function to decorate the callback such that it will
+    be run by the event loop outside of the scope of STM::
+    
+        @atomically_watch(some_tvar.get)
+        @stm.eventloop.scheduled_function
+        def _(result):
+            print "Changed to " + str(result) # Or any other I/O
+        
     """
-    def decorator(callback):
-        @functools.wraps(function)
-        def wrapper():
-            stm.watch(function, callback)
+    if callback is None:
+        def decorator(actual_callback):
+            atomically_watch(function, actual_callback)
+        return decorator
+    stm.atomically(lambda: stm.watch(function, callback))
 
 
 
