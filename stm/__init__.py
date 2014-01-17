@@ -23,7 +23,7 @@ import time
 import traceback
 
 __all__ = ["TVar", "TWeakRef", "atomically", "retry", "or_else", "invariant",
-           "previously"]
+           "previously", "watch"]
 
 
 class _Restart(BaseException):
@@ -1053,7 +1053,40 @@ def watch(function, callback=None):
     _stm_state.get_current().proposed_watchers.append(_Watcher(function, callback))
 
 
-
+def invariant(function):
+    """
+    (This function is a wrapper on top of watch(). The same warning present on
+    watch() applies here.)
+    
+    Provides support for transactional invariants.
+    
+    This function is called to propose a new invariant. The passed-in function
+    must succeed now, at the end of the current transaction, and at the end of
+    every subsequent transaction. If it fails at the end of any transaction,
+    that transaction will be immediately aborted, and the exception raised by
+    the invariant propagated.
+    
+    To succeed, a function must return either None or True. It can indicate
+    failure either by returning False or by raising an exception. This allows
+    both invariants that signal failure by raising an exception and invariants
+    that signal success/failure by returning the value of a simple boolean
+    expression.
+    
+    This function used to be its own primitive before the introduction of
+    watch(). It's now just a simple wrapper on top of that function.
+    
+    TODO: Update documentation
+    """
+    def wrapper():
+        result = function()
+        if result is None or result is True:
+            return
+        if result is False:
+            raise Exception("Invariant %r was violated" % function)
+        else:
+            raise Exception("Invariant %r returned an unexpected value: %r"
+                            % (function, result))
+    watch(wrapper, lambda _: None)
 
 
 
