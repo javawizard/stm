@@ -391,6 +391,7 @@ class _BaseTransaction(_Transaction):
                 for var in callback_transaction.modified_set:
                     new_watchers_to_run.update(self.get_watchers(var))
             watchers_to_run = new_watchers_to_run
+            new_watchers_to_run = set()
             # Copy in any new proposals made during callback runs
             watchers_to_run.update(set(self.proposed_watchers))
             self.proposed_watchers = []
