@@ -1,6 +1,6 @@
 
 from stm.threadutils import ThreadPool
-from stm.utils import atomically_watch, changes_only_according_to
+from stm.utils import atomically_watch, changes_only
 from stm.eventloop import scheduled_function
 import random
 import operator
@@ -8,11 +8,11 @@ import time
 
 pool = ThreadPool(5, 3)
 
-@atomically_watch(lambda: (pool.tasks_scheduled, pool.tasks_finished, pool._live_threads, pool._free_threads))
-@changes_only_according_to(operator.eq)
+@atomically_watch(lambda: (pool.tasks_scheduled, pool.tasks_finished, pool._live_threads, pool._free_threads, len(pool._tasks)))
+@changes_only(according_to=operator.eq)
 @scheduled_function
-def _((scheduled, finished, live, free)):
-    print "{0} scheduled, {1} finished, {2} threads live, {3} free".format(scheduled, finished, live, free)
+def _((scheduled, finished, live, free, tasks)):
+    print "{0} scheduled, {1} finished, {2} threads live, {3} free, {4} tasks scheduled".format(scheduled, finished, live, free, tasks)
 
 def task():
     time.sleep(random.random() + 0.5)

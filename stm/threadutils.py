@@ -10,6 +10,7 @@ import stm.datatypes
 import stm.eventloop
 import stm.utils
 import traceback
+import operator
 
 # Thread has been created but start() hasn't been called
 NEW = "stm.threadutils.NEW"
@@ -112,6 +113,25 @@ class ThreadPool(stm.datatypes.TObject):
             self._free_threads = 0
             self._tasks_scheduled = 0
             self._tasks_finished = 0
+            stm.watch(self._calculate_threads_short, self._spin_up_threads)
+    
+    def _calculate_threads_short(self):
+        """
+        Calculate and return the number of threads that we would need to spin
+        up given our current circumstances in order to have one free thread for
+        every scheduled task without going over the limit.
+        """
+        return min(len(self._tasks) - self._free_threads, self._max_threads - self._live_threads)
+    
+    @stm.utils.changes_only(according_to=operator.eq)
+    def _spin_up_threads(self, number_of_threads):
+        """
+        Spin up the specified number of threads.
+        """
+        for _ in range(number_of_threads):
+            self._live_threads += 1
+            self._free_threads += 1
+            Thread(target=self._worker_run).start()
     
     @stm.utils.atomic_function
     def schedule(self, function):
@@ -122,18 +142,7 @@ class ThreadPool(stm.datatypes.TObject):
         # Schedule the task to be run
         self._tasks.insert(0, function)
         self._tasks_scheduled += 1
-        # See if we should start a new thread
-        if self._free_threads == 0 and self._live_threads < self._max_threads:
-            # No free threads to handle this task and we haven't maxed out
-            # the number of threads we can start, so increment our live
-            # thread counter and start a new thread. We let the thread mark
-            # itself as free once it starts up (and, ostensibly, finishes
-            # running the task we just scheduled) in order not to prevent
-            # ourselves from spawning further threads in the current
-            # transaction if need be.
-            self._live_threads += 1
-            Thread(target=self._thread_run).start()
-    
+
     def join(self, timeout_after=None, timeout_at=None):
         """
         Wait until this thread pool is idle, i.e. all scheduled tasks have
@@ -159,35 +168,23 @@ class ThreadPool(stm.datatypes.TObject):
     def tasks_remaining(self):
         return self._tasks_scheduled - self._tasks_finished
     
-    def _thread_run(self):
+    def _worker_run(self):
         while True:
-            # See if we have a task ready to run yet. Note that we're not
-            # currently marked as free as far as self._free_threads is
-            # concerned.
             @stm.atomically
             def task():
+                # See if we have any tasks to run.
                 if self._tasks:
-                    # Yep, we've got a task to run.
-                    return self._tasks.pop()
-                else:
-                    # No tasks yet, so mark ourselves as free.
-                    self._free_threads += 1
-            if not task:
-                @stm.atomically
-                def task():
-                    # We didn't have any tasks to run before. See if we do now.
-                    if self._tasks:
-                        # We do. Mark ourselves as no longer free.
-                        self._free_threads -= 1
-                        return self._tasks.pop()
-                    # No tasks yet, so retry.
-                    stm.retry(self._keep_alive)
-                    # It's been self._keep_alive seconds and we haven't had
-                    # any free tasks yet, so decrement the number of free and
-                    # live threads and die.
+                    # We do. Mark ourselves as no longer free.
                     self._free_threads -= 1
-                    self._live_threads -= 1
-                    return None
+                    return self._tasks.pop()
+                # No tasks yet, so retry.
+                stm.retry(self._keep_alive)
+                # It's been self._keep_alive seconds and we haven't had
+                # any free tasks yet, so decrement the number of free and
+                # live threads and die.
+                self._free_threads -= 1
+                self._live_threads -= 1
+                return None
             # Do the actual dying if we've been idle too long
             if not task:
                 return
@@ -203,6 +200,7 @@ class ThreadPool(stm.datatypes.TObject):
             @stm.atomically
             def _():
                 self._tasks_finished += 1
+                self._free_threads += 1
 
 
 

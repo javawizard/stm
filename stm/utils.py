@@ -77,11 +77,15 @@ def changes_only(callback=None, according_to=None):
     if callback and according_to:
         last = stm.atomically(lambda: stm.TVar((False, None)))
         @functools.wraps(callback)
-        def actual_callback(result):
+        def actual_callback(*args):
+            # We use *args here to permit @changes_only to be used to decorate
+            # methods on objects; in such cases, we'll be passed two arguments,
+            # self and the actual result.
+            result = args[-1]
             has_run, last_value = last.value
             if not has_run or not according_to(last_value, result):
                 last.value = True, result
-                callback(result)
+                callback(*args)
         return actual_callback
     elif callback:
         return changes_only(callback, operator.is_)
@@ -132,6 +136,7 @@ def atomically_watch(function, callback=None):
             atomically_watch(function, actual_callback)
         return decorator
     stm.atomically(lambda: stm.watch(function, callback))
+
 
 
 

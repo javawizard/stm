@@ -1,0 +1,27 @@
+So I wrote stm.threadutils.ThreadPool, but (especially since the introduction of stm.watch) I think I can rewrite it to be somewhat more intuitive.
+
+And I also want to rewrite it to conform to Python 3.something's concurrent.futures.Executor interface.
+
+So, my thought is to scrap ThreadPool.schedule as an independently useful function and move all of its logic into a watcher.
+
+(And the cool thing about that is that then a pool can be constructed against any old TList, and adding items to the TList would cause threads to be automatically spun up as necessary.)
+
+So, the idea would go something like this:
+
+We have a watcher function that determines (I'll get to the specifics of this bit in a bit) the number of threads short that we currently are in order to run as many tasks as we have scheduled without exceeding the maximum number of threads we're allowed.
+
+Then we have an attached callback function that takes that number and starts that many new threads. Part of starting a thread would be to increment _live_threads (and, I'm thinking, _free_threads as well; this algorithm actually /should/ require _free_threads to be incremented immediately), and the watcher function would be written such that this would end up decreasing its number-of-thread-we-are-short to exactly 0. So the callback gets called, we start threads, the callback gets called again, and we see that we're not short any threads and so we don't start any. Note that I'll likely wrap the callback in a changes_only(according_to=operator.eq).
+
+So, the watcher function would just be min(len(tasks) - _free_threads, _max_threads - _live_threads).
+
+The first bit, len(tasks) - _free_threads, gives us the number of threads that we'd need to spin up to have exactly one free thread for each scheduled task.
+
+The second bit, _max_threads - _live_threads, gives us the number of threads that we'd need to spin up to have exactly the maximum number of threads that we're allowed to have running at one time.
+
+So then we just take the minimum of the two since we don't need more than the first one and we aren't allowed to have more than the second one, and that's it.
+
+That also allows us to simplify the code that the workers actually run. I made it a bit more complicated to get around a scheduling issue where a bunch of tasks all scheduled on the same transaction would result in only one thread being started to handle them, but that would no longer be necessary: such a case couldn't arise, because the watcher would indicate that more tasks than free threads existed and that therefore more threads needed to be spun up.
+
+So yeah, I think I'm going to convert the existing ThreadPool to use this approach first, before I worry about making it conform to concurrent.futures.Executor.
+
+(Oh, also, the watch thing means that, if a new task slips into the task list between a worker marking itself as free and marking itself as no longer free, an additional thread will be spun up by the worker marking itself as no longer free to handle the task.)
