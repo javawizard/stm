@@ -12,8 +12,15 @@ class. Those form the core building blocks of the STM system.
 from threading import local as _Local, Lock as _Lock, Thread as _Thread
 from threading import Event as _Event
 import weakref as weakref_module
+try:
+    from weakref import WeakSet as _WeakSet
+except ImportError: # 2.6 or earlier
+    # TODO: Consider wrapping this one in a try/except as well and raising an
+    # exception with a more informative error message
+    from weakrefset import WeakSet as _WeakSet
 from contextlib import contextmanager
 import time
+import traceback
 
 __all__ = ["TVar", "TWeakRef", "atomically", "retry", "or_else", "invariant",
            "previously"]
@@ -560,7 +567,7 @@ class _Watcher(object):
         # anything else: if they're garbage collected, then the tracked
         # function itself wouldn't have been able to access them during its
         # next run, so we don't care about them.
-        self.watched_vars = weakref_module.WeakSet()
+        self.watched_vars = _WeakSet()
 
     def _check_clean(self, transaction):
         if self._modified > transaction.start:
@@ -682,7 +689,7 @@ class TWeakRef(object):
         # which this TWeakRef was created never committed, but with recent
         # changes to how TWeakRef tracks weak references, this is no longer
         # necessary.
-        self.callback = callback
+        self._callback = callback
         _stm_state.get_base().created_weakrefs.add(self)
         # TODO: Note in TWeakRef's documentation that TWeakRefs don't become
         # weak until the transaction creating them commits, so if they're
@@ -699,29 +706,37 @@ class TWeakRef(object):
         This will always return the same value over the course of a given
         transaction.
         """
-        if self._mature:
-            value = self._weak_ref()
-            if value is None and self in _stm_state.get_base().live_weakrefs:
-                # Ref was live at some point during the past transaction but
-                # isn't anymore
-                raise _Restart
-            # Value isn't inconsistent. Add it to the retry list (so that we'll
-            # retry if we get garbage collected) and the check list (so that
-            # we'll be checked for consistency again at the end of the
-            # transaction).
-            _stm_state.get_base().read_set.add(self)
-            # Then, if we're live, add ourselves to the live list, so that if
-            # we later die in the transaction, we'll properly detect an
-            # inconsistency
-            if value is not None:
-                _stm_state.get_base().live_weakrefs.add(self)
-            # Then return our value.
-            return value
-        else:
-            # We were just created during this transaction, so we haven't
-            # matured (and had our ref wrapped in an actual weak reference), so
-            # return our value.
-            return self._strong_ref
+        # Add ourselves to the read sets of our current transaction and all of
+        # its parents. Adding ourselves to the base transaction's read set
+        # would be sufficient to get retries to work, but a given watch won't
+        # work without us adding ourselves to the read set of the nested
+        # transaction in which the watch's function is run. TODO: Decide if we
+        # really need to add ourselves to the read sets if we're currently
+        # dead and haven't been alive during this transaction; in such a case,
+        # our value will never change, so there might not be any point in
+        # adding ourselves to the read set in such a case (and indeed, not
+        # doing so would prevent watchers from needlessly watching us after our
+        # value's been garbage collected)
+        t = _stm_state.get_current()
+        while t:
+            t.read_set.add(self)
+            t = t.parent
+        # Then get our current value. Note that, on account of _strong_ref
+        # holding a strong reference to our value until _make_mature is called
+        # from _BaseTransaction.commit, this will never return None during the
+        # base transaction in which this TWeakRef was created.
+        value = self._weak_ref()
+        # Then see if were alive at some point during this transaction but have
+        # since died
+        if value is None and self in _stm_state.get_base().live_weakrefs:
+            # We were, so restart.
+            raise _Restart
+        # Then, if we're live, add ourselves to the live list so that if we
+        # later die during this transaction we can restart as per above
+        if value is not None:
+            _stm_state.get_base().live_weakrefs.add(self)
+        # Then return our value.
+        return value
     
     value = property(get, doc="""A property wrapper around self.get.
     
@@ -779,9 +794,31 @@ class TWeakRef(object):
             with _global_lock:
                 for e in self._events:
                     e.set()
-            # FIXME: Run tracked functions in self._tracked_functions on
-            # their own transaction (but revert the transaction in which
-            # function is run), probably before we invoke the callback
+            # Re-run all of our watchers. We do this by running a transaction
+            # whose sole action is to add us to its modified set. We
+            # catch any exceptions that occur and print out a message telling
+            # the user that they've likely horked the STM system by making a
+            # watcher try to reject a weakref being garbage collected. NOTE:
+            # Watchers that retry will, as expected, cause the entire
+            # revalidation of the TWeakRef to retry and will block up
+            # invocation of the weakref's callback. I'm still debating whether
+            # this is the best route to go or whether it wouldn't be better to
+            # kill off the transaction if it attempts to retry.
+            try:
+                @atomically
+                def _():
+                    self.get()
+                    _stm_state.get_current().modified_set.add(self)
+            except:
+                # TODO: Think up a more informative error message. Also write
+                # this to stderr instead of stdout.
+                print "STM ERROR: A watch function threw an exception while"
+                print "being re-run due to a TWeakRef's referent being garbage"
+                print "collected. Your program's data is now in an"
+                print "inconsistent state. Fix the watch function whose"
+                print "traceback you're about to see."
+                traceback.print_exc()
+                raise
             if self._callback is not None:
                 atomically(self._callback)
         _Thread(name="%r dead value notifier" % self, target=run).start()
