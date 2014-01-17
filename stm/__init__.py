@@ -156,8 +156,16 @@ class _Transaction(object):
         # that were read during this transaction.
         self.read_set = set()
         # Vars that have been written at any point during this transaction.
-        # These are the vars for which load_threatened_invariants was called.
+        # These are the vars whose values need to be persisted while we're
+        # actually committing.
         self.write_set = set()
+        # Vars and weakrefs which have been altered over the course of the
+        # transaction such that their watchers need to be re-run. This
+        # ordinarily is equivalent to write_set, but TWeakRef._on_value_dead
+        # runs an otherwise empty transaction with modified_set containing the
+        # TWeakRef that was just garbage collected to cause its watchers to be
+        # invoked.
+        self.modified_set = set()
         # Sets of vars whose _watchers have been read/written
         self.watchers_changed_set = set()
         # Sets of watchers whose watched_vars have been read/written
@@ -165,7 +173,7 @@ class _Transaction(object):
         self.proposed_watchers = []
     
     def values_to_check_for_cleanliness(self):
-        return (self.read_set | self.write_set |
+        return (self.read_set | self.write_set | self.modified_set |
             self.watchers_changed_set | self.watched_vars_changed_set)
     
     def load_value(self, var):
@@ -226,6 +234,7 @@ class _Transaction(object):
         """
         self.var_cache[var] = value
         self.write_set.add(var)
+        self.modified_set.add(var)
     
     def get_watchers(self, var):
         try:
@@ -346,7 +355,7 @@ class _BaseTransaction(_Transaction):
         global _last_transaction
         
         watchers_to_run = set()
-        for var in self.write_set:
+        for var in self.modified_set:
             watchers_to_run.update(self.get_watchers(var))
         # Run all of the proposals here, and blank out the list of
         # proposals since we're turning them into entries on
@@ -372,7 +381,7 @@ class _BaseTransaction(_Transaction):
                 with _stm_state.with_current(callback_transaction):
                     watcher.callback(result)
                 callback_transaction.commit()
-                for var in callback_transaction.write_set:
+                for var in callback_transaction.modified_set:
                     new_watchers_to_run.update(self.get_watchers(var))
             watchers_to_run = new_watchers_to_run
             # Copy in any new proposals made during callback runs
@@ -509,10 +518,14 @@ class _NestedTransaction(_Transaction):
     def commit(self):
         for var in self.write_set:
             self.parent.set_value(var, self.var_cache[var])
+        self.parent.modified_set.update(self.modified_set)
         
         # TODO: Extract code that runs watchers into a separate function on
         # _Transaction, then call it from here. Then we won't need to copy
-        # self.proposed_watchers to self.parent.
+        # self.proposed_watchers to self.parent, as all of the watchers will
+        # have already been run here and added to self.watched_vars_changed_set
+        # (unless they didn't actually watch anything, in which case we don't
+        # care about them)
         self.parent.proposed_watchers.extend(self.proposed_watchers)
         for var in self.watchers_changed_set:
             self.parent.set_watchers(var, self.get_watchers(var))
