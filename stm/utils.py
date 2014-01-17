@@ -49,37 +49,48 @@ def wait_until(function, timeout_after=None, timeout_at=None):
             raise Timeout
 
 
-def changes_only(callback):
+def changes_only(callback=None, according_to=None):
     """
     A decorator that can be used to decorate callbacks that are to be passed to
     stm.watch to filter out duplicate invocations with the same result value.
+    It can be used either as::
+    
+        @changes_only
+        def callback(result):
+            ...
+    
+    or as::
+    
+        @changes_only(according_to=some_predicate)
+        def callback(result):
+            ...
+    
+    with the latter allowing a custom two-argument function to be used to
+    compare the equality of the value passed to a given invocation with the
+    value passed to the previous invocation; the former compares values using
+    the "is" operator.
     
     Note that the resulting callback will keep a reference around to the last
     value with which it was called, so make sure you're not counting on this
     value's being garbage collected immediately after the callback is invoked.
-    
-    By default, the "is" operator is used to compare each value with the one
-    passed in previously. If you need another operator (for example,
-    operator.eq) to be used, have a look at changes_only_according_to().
     """
-    return changes_only_according_to(operator.is_)(callback)
-
-
-def changes_only_according_to(predicate):
-    """
-    A variant of changes_only that allows specifying the function used to test
-    values for equality.
-    """
-    def decorator(callback):
+    if callback and according_to:
         last = stm.atomically(lambda: stm.TVar((False, None)))
         @functools.wraps(callback)
         def actual_callback(result):
             has_run, last_value = last.value
-            if not has_run or not predicate(last_value, result):
+            if not has_run or not according_to(last_value, result):
                 last.value = True, result
                 callback(result)
         return actual_callback
-    return decorator
+    elif callback:
+        return changes_only(callback, operator.is_)
+    elif according_to:
+        def decorator(callback):
+            return changes_only(callback, according_to)
+        return decorator
+    else:
+        raise ValueError("Either callback or according_to must be specified")
 
 
 def atomically_watch(function, callback=None):
