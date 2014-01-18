@@ -19,11 +19,11 @@ except ImportError: # 2.6 or earlier
     # exception with a more informative error message
     from weakrefset import WeakSet as _WeakSet
 from contextlib import contextmanager
-import time
+import time as time_module
 import traceback
 
 __all__ = ["TVar", "TWeakRef", "atomically", "retry", "or_else", "invariant",
-           "previously", "watch"]
+           "previously", "watch", "elapsed"]
 
 
 class _Restart(BaseException):
@@ -131,13 +131,13 @@ class _Timer(_Thread):
             if self.cancel_event.is_set():
                 # We got a cancel request, so return.
                 return
-            time_to_sleep = min(0.3, self.resume_at - time.time())
+            time_to_sleep = min(0.3, self.resume_at - time_module.time())
             if time_to_sleep <= 0:
                 # Timeout's up! Notify the event, then return.
                 self.event.set()
                 return
             # Timeout's not up. Sleep for the specified amount of time.
-            time.sleep(time_to_sleep)
+            time_module.sleep(time_to_sleep)
     
     def cancel(self):
         self.cancel_event.set()
@@ -472,9 +472,9 @@ class _BaseTransaction(_Transaction):
         # current time (in case we resumed earlier than requested due to TVar
         # etc. changes).
         if self.resume_at is None:
-            self.next_start_time = time.time()
+            self.next_start_time = time_module.time()
         else:
-            self.next_start_time = min(time.time(), self.resume_at)
+            self.next_start_time = min(time_module.time(), self.resume_at)
         # And then we restart.
         raise _Restart
     
@@ -855,7 +855,7 @@ def atomically(function):
     toplevel = not bool(_stm_state.current)
     # If we're the outermost transaction, store down the time we're starting
     if toplevel:
-        overall_start_time = time.time()
+        overall_start_time = time_module.time()
         current_start_time = overall_start_time
     while True:
         # If we have no current transaction, create a _BaseTransaction.
@@ -913,37 +913,66 @@ def retry(resume_after=None, resume_at=None):
     system call, with the or_else function. See its documentation for more
     information.
     
-    Either resume_at or resume_after may be specified, and serve to indicate a
-    timeout after which the call to retry() will give up and just return
-    instead of retrying. resume_after indicates a number of seconds from when
-    this transaction was first attempted at which to time out, and resume_at
-    indicates a wall clock time (a la time.time()) at which to time out.
+    Resume_after and resume_at provide a mechanism to effect timeouts that
+    became obsolete with the introduction of elapsed(). Their presence causes
+    retry to behave thus::
     
-    Timeouts are highly experimental and a feature shared with only one other
-    STM system that I know of (scala-stm), so I'd greatly appreciate feedback
-    on this feature.
+        if elapsed(seconds=resume_after, time=resume_at):
+            return
+        retry()
+    
+    They will be going away in a future version of this library.
     """
     # Make sure we're in a transaction
     _stm_state.get_current()
-    if resume_after is not None and resume_at is not None:
-        raise ValueError("Only one of resume_after and resume_at can be "
-                         "specified")
-    # If resume_after was specified, compute resume_at in terms of it
-    if resume_after is not None:
-        resume_at = _stm_state.get_base().overall_start_time + resume_after
-    # If we're retrying with a timeout (either resume_after or resume_at),
-    # check to see if it's elapsed yet
-    if resume_at is not None:
-        if _stm_state.get_base().current_start_time >= resume_at:
-            # It's elapsed, so just return.
-            return
-        else:
-            # It hasn't elapsed yet, so let our base transaction know when we
-            # want it to resume.
-            _stm_state.get_base().update_resume_at(resume_at)
-    # Either we didn't have a timeout or our timeout hasn't elapsed yet, so
-    # raise _Retry.
+    # If either resume_at or resume_after were specified, see if that many
+    # seconds have gone by, and just return if so
+    if (resume_after or resume_at) and elapsed(resume_after, resume_at):
+        return
+    # Then raise the actual exception.
     raise _Retry
+
+
+def elapsed(seconds=None, time=None):
+    """
+    Provides support for timeouts.
+    
+    This function returns True if the specified amount of time has passed, or
+    False if it hasn't. This provides a transactionally safe way to implement
+    things like timeouts.
+    
+    Either seconds or time may be specified. Seconds indicates a number of
+    seconds from when this transaction was first attempted after which this
+    function will return True. Time indicates an absolute time (given in terms
+    of time.time()) at which this function will return True.
+    
+    This could be used to, for example, pop an item from the end of a list,
+    waiting up to n seconds for an item to become available before raising
+    Timeout::
+    
+        if some_list:
+            return some_list.pop()
+        elif elapsed(n):
+            raise Timeout
+        else:
+            retry()
+    """
+    if seconds is None and time is None:
+        raise ValueError("Either seconds or time must be specified.")
+    if seconds is not None and time is not None:
+        raise ValueError("Only one of seconds and time can be specified.")
+    # If seconds was specified, compute time in terms of it
+    if seconds is not None:
+        time = _stm_state.get_base().overall_start_time + seconds
+    # Now see if we've reached the specified time yet.
+    if _stm_state.get_base().current_start_time >= time:
+        # We have, so just return True.
+        return True
+    else:
+        # We haven't, so let our base transaction know that we need to wake up
+        # and re-run this transaction at the specified time, then return False.
+        _stm_state.get_base().update_resume_at(time)
+        return False
 
 
 def or_else(*functions):
@@ -1024,7 +1053,7 @@ def previously(function, toplevel=False):
     finally:
         if isinstance(transaction, _BaseTransaction):
             # Copy over the read set so that, if the transaction retries, it'll
-            # resume if any of the variables read here change
+            # resume if any of the variables read here change.
             current.read_set.update(transaction.read_set)
             if transaction.resume_at is not None:
                 current.update_resume_at(transaction.resume_at)
