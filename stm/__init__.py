@@ -997,6 +997,12 @@ def elapsed(seconds=None, time=None):
     when it took on elapsed's job, and makes writing code that may or may not
     time out somewhat easier.
     """
+    # NOTE: Using elapsed() inside a watch function doesn't do the "expected
+    # thing", namely cause the watch to be re-run when elapsed()'s result would
+    # change. This would be a really nice feature to have, not least because it
+    # would allow things like scheduling tasks to occur in the future (simply
+    # place a watch that simply checks the value of elapsed() and then performs
+    # the task in its callback).
     if seconds is None and time is None:
         return False
     if seconds is not None and time is not None:
@@ -1038,7 +1044,10 @@ def or_else(*functions):
     
     Note that each function passed in is automatically run in its own nested
     transaction so that the effects of those that end up retrying are reverted
-    and only the effects of the function that succeeds are persisted.
+    and only the effects of the function that succeeds are persisted. Also note
+    that if any of the functions raise an exception, that exception will be
+    propagated, and the side effects of the function reverted. (I'm still
+    debating that last point, so that could change.)
     """
     # Make sure we're in a transaction
     _stm_state.get_current()
