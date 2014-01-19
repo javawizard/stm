@@ -991,9 +991,14 @@ def elapsed(seconds=None, time=None):
             raise Timeout
         else:
             retry()
+    
+    None is considered to be an infinite timeout, so False will be returned if
+    both seconds and time are None. This mirrors the old behavior of retry()
+    when it took on elapsed's job, and makes writing code that may or may not
+    time out somewhat easier.
     """
     if seconds is None and time is None:
-        raise ValueError("Either seconds or time must be specified.")
+        return False
     if seconds is not None and time is not None:
         raise ValueError("Only one of seconds and time can be specified.")
     # If seconds was specified, compute time in terms of it

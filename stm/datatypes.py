@@ -459,11 +459,12 @@ class BroadcastEndpoint(TObject):
         raised.
         """
         if self._var.get() is None:
-            if block:
-                stm.retry(resume_after=timeout)
+            if not block:
+                raise Empty
+            elif stm.elapsed(timeout):
                 raise Timeout
             else:
-                raise Empty
+                stm.retry()
         else:
             item = self._var.get()
             self._var = item.next
