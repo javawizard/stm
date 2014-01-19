@@ -55,6 +55,35 @@ def wait_until(function, timeout_after=None, timeout_at=None):
             stm.retry()
 
 
+def would_block(function):
+    """
+    Run the specified function in a nested transaction, abort the nested
+    transaction to avoid any side effects being persisted, then return True if
+    the function attempted to retry.
+    """
+    try:
+        # Create a function to pass to or_else that runs the function, then
+        # raises an exception to abort the nested transaction.
+        def run_and_raise():
+            function()
+            # We need to abort this nested transaction to avoid the function's
+            # side effects being persisted, and we don't differentiate between
+            # a function that runs successfully and a function that raises an
+            # exception (neither would retry), so just raise Exception here.
+            raise Exception()
+        # The call to stm.atomically isn't strictly necessary right now, but
+        # I'm considering changing or_else to not revert the effects of a
+        # function that ends up throwing an exception, in which case it would
+        # be necessary.
+        stm.atomically(lambda: stm.or_else(run_and_raise, lambda: None))
+        # Function tried to retry
+        return True
+    except Exception:
+        # Function didn't retry (either it threw an exception itself or it
+        # succeeded, in which case we threw the exception for it)
+        return False
+
+
 def changes_only(callback=None, according_to=None):
     """
     A decorator that can be used to decorate callbacks that are to be passed to
