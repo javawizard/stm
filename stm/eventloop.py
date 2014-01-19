@@ -4,6 +4,7 @@ import stm
 from threading import Thread
 import traceback
 import functools
+import atexit
 
 class EventLoop(object):
     def __init__(self):
@@ -75,6 +76,14 @@ def scheduled_function(function):
     return default_event_loop.scheduled_function(function)
 
 
+# On interpreter shutdown, wait for the eventloop to finish processing all of
+# its events
+@atexit.register
+def _():
+    @stm.atomically
+    def _():
+        if not default_event_loop._endpoint.is_empty:
+            stm.retry()
 
 
 

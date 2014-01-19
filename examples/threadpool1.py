@@ -22,10 +22,5 @@ for _ in range(40):
 
 pool.join()
 
-# Sleep a bit to let the eventloop process our final progress message. This
-# won't be necessary once I add an atexit hook to stm.eventloop to wait until
-# all events have been processed before shutting down.
-# 
-# Also, TODO: Figure out why ThreadPool's keep_alive isn't keeping threads
+# TODO: Figure out why ThreadPool's keep_alive isn't keeping threads
 # (and thus this script) alive for 3 seconds after we join...
-time.sleep(0.5)
