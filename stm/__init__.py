@@ -185,7 +185,7 @@ class _Transaction(object):
     
     def load_value(self, var):
         """
-        Returns the real value of the specified variable, possibly throwing
+        Return the real value of the specified variable, possibly throwing
         _Restart if the variable has been modified since this transaction
         started. This will only be called once for any given var in any given
         transaction; the value will thereafter be stored in self.var_cache.
@@ -194,10 +194,20 @@ class _Transaction(object):
         raise NotImplementedError
     
     def load_watchers(self, var):
+        """
+        Return the set of watchers (_Watcher instances) that are watching the
+        specified variable, possibly throwing _Restart if the variable's list
+        of watchers has been modified since this transaction started.
+        """
         # Note that var can be a TVar or a TWeakRefs
         raise NotImplementedError
     
     def load_watched_vars(self, watcher):
+        """
+        Return the set of vars and weakrefs that a particular watcher is
+        watching, possibly throwing _Restart if the watcher been re-run since
+        this transaction started.
+        """
         raise NotImplementedError
     
     def run(self, function):
@@ -210,12 +220,9 @@ class _Transaction(object):
     
     def get_value(self, var):
         """
-        TODO: Update documentation
-        
-        Looks up the value of the specified variable in self.var_cache and
-        returns it, or calls self.get_real_value(var) (and then stores it in
-        self.var_cache) if the specified variable is not in self.var_cache.
-        This is a concrete function; subclasses need not override it.
+        Look up the value of the specified variable in self.var_cache and
+        return it. If it's not there, look it up with self.load_value, store
+        the result in self.var_cache, and return it.
         """
         # Note: We intentionally don't add the var to the read set if we wrote
         # it before we ever read it, as its value before the transaction
@@ -236,8 +243,9 @@ class _Transaction(object):
     
     def set_value(self, var, value):
         """
-        Sets the entry in self.var_cache for the specified variable to the
-        specified value.
+        Set the entry in self.var_cache for the specified variable to the
+        specified value and add the variable to self.write_set and
+        self.modified_set.
         """
         self.var_cache[var] = value
         self.write_set.add(var)
@@ -361,46 +369,74 @@ class _BaseTransaction(_Transaction):
     def commit(self):
         global _last_transaction
         
+        # Create a set of watchers that need to be (re-)run before we commit
         watchers_to_run = set()
+        # Add all watchers watching any vars we've modified
         for var in self.modified_set:
             watchers_to_run.update(self.get_watchers(var))
-        # Run all of the proposals here, and blank out the list of
-        # proposals since we're turning them into entries on
-        # watchers_changed and watched_vars_changed
+        # Also run all of the proposed watchers here, and blank out the list of
+        # proposals since we're turning them into entries on watchers_changed
+        # and watched_vars_changed
         watchers_to_run.update(set(self.proposed_watchers))
         self.proposed_watchers = []
-
+        
+        # Create a set to keep track of watchers triggered by the callbacks of
+        # the watchers we're about to run. We'll need to come back and run
+        # these ones again after we're done.
         new_watchers_to_run = set()
         while watchers_to_run:
             for watcher in watchers_to_run:
+                # Look up which vars this watcher accessed on its last run.
+                # If the watcher was run previously in this transaction, this
+                # will return the vars it accessed on its most recent run.
                 formerly_watched_vars = self.get_watched_vars(watcher)
+                # Then create a nested transaction in which to run the watcher,
+                # and run it.
                 watcher_transaction = _NestedTransaction(self)
                 with _stm_state.with_current(watcher_transaction):
                     result = watcher.function()
+                # Then get a list of vars the watcher accessed this time and
+                # update our transaction's list of vars accessed by the watcher
+                # on its last run
                 newly_watched_vars = watcher_transaction.read_set
                 self.set_watched_vars(watcher, newly_watched_vars)
+                # Then look at which vars the watcher accessed this time but
+                # not last time and vice versa, and add the watcher to each
+                # of those vars' list of watchers and vice versa. Note that we
+                # create new sets instead of updating the existing ones.
                 for formerly_watched_var in formerly_watched_vars - newly_watched_vars:
                     # TODO: See if we can avoid the constant set cloning
                     self.set_watchers(formerly_watched_var, self.get_watchers(formerly_watched_var) - set([watcher]))
                 for newly_watched_var in newly_watched_vars - formerly_watched_vars:
                     self.set_watchers(newly_watched_var, self.get_watchers(newly_watched_var) | set([watcher]))
+                # Now we run the callback in its own transaction.
                 callback_transaction = _NestedTransaction(self)
                 with _stm_state.with_current(callback_transaction):
                     watcher.callback(result)
+                # Then we commit the callback's transaction.
                 callback_transaction.commit()
+                # Then we see which vars the callback modified and add all of
+                # their watchers to the set of watchers that we need to re-run.
                 for var in callback_transaction.modified_set:
                     new_watchers_to_run.update(self.get_watchers(var))
+            # Then we swap new_watchers_to_run into watchers_to_run and create
+            # a new, blank set for new_watchers_to_run for our next iteration
+            # through this loop.
             watchers_to_run = new_watchers_to_run
             new_watchers_to_run = set()
-            # Copy in any new proposals made during callback runs
+            # Then we copy in any new proposed watchers made during callback
+            # runs. This should become unnecessary once nested transactions
+            # re-run watchers as well, as the watchers will simply become
+            # entries in self.watchers_changed.
             watchers_to_run.update(set(self.proposed_watchers))
             self.proposed_watchers = []
         
+        # None of the watchers raised an exception, so we're good to commit.
         with _global_lock:
-            # Now we make sure nothing we read or modified changed since this
-            # transaction started. This will take care of making sure that
-            # none of our TWeakRefs that we read as alive have since been
-            # garbage collected.
+            # First we make sure nothing we read or modified was changed by
+            # anothe transaction  since this one started. This will take care
+            # of making sure that none of our TWeakRefs that we read as alive
+            # have since been garbage collected.
             for item in self.values_to_check_for_cleanliness():
                 item._check_clean(self)
             # Nothing changed, so we're good to commit. First we make
@@ -412,19 +448,18 @@ class _BaseTransaction(_Transaction):
             for var in self.write_set:
                 var._update_real_value(self.get_value(var))
                 var._modified = modified
-            
+            # Then we update each var's list of watchers watching it.
             for var in self.watchers_changed_set:
                 var._watchers = self.get_watchers(var)
                 var._modified = modified
-            
+            # Then we update each watcher's list of vars that it's watching.
             for watcher in self.watched_vars_changed_set:
                 # Make them equal without creating a new WeakSet
                 watcher.watched_vars.intersection_update(self.get_watched_vars(watcher))
                 watcher.watched_vars.update(self.get_watched_vars(watcher))
                 watcher._modified = modified
-            
-            # And then we tell all TWeakRefs created during this
-            # transaction to mature
+            # Then we tell all TWeakRefs created during this transaction to
+            # mature, and we're done!
             for ref in self.created_weakrefs:
                 ref._make_mature()
     
