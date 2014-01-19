@@ -85,7 +85,7 @@ _global_lock = _Lock()
 _last_transaction = 0
 
 
-class _Timer(_Thread):
+class _ThreadWaiter(_Thread):
     """
     A timer similar to threading.Timer but with a few differences:
     
@@ -112,24 +112,19 @@ class _Timer(_Thread):
     proper blocking timeout on all platforms except Windows (and hey, who
     cares about Windows anyway?).
     """
-    def __init__(self, event, resume_at):
+    def __init__(self, resume_at):
         _Thread.__init__(self, name="Timeout thread expiring at %s" % resume_at)
-        self.event = event
+        self.event = _Event()
         self.resume_at = resume_at
         self.cancel_event = _Event()
-    
-    def start(self):
-        # Only start the thread if we've been given a non-None timeout
-        # (allowing resume_at to be None and treating it as an infinite timeout
-        #  makes the retry-related logic in _BaseTransaction simpler)
-        if self.resume_at is not None:
-            _Thread.start(self)
+        if resume_at is not None:
+            self.start()
     
     def run(self):
         while True:
-            # Check to see if we've been asked to cancel
-            if self.cancel_event.is_set():
-                # We got a cancel request, so return.
+            # Check to see if we've been set by an external call to notify
+            if self.event.is_set():
+                # We have been, so return.
                 return
             time_to_sleep = min(0.3, self.resume_at - time_module.time())
             if time_to_sleep <= 0:
@@ -139,8 +134,13 @@ class _Timer(_Thread):
             # Timeout's not up. Sleep for the specified amount of time.
             time_module.sleep(time_to_sleep)
     
-    def cancel(self):
-        self.cancel_event.set()
+    def wait(self):
+        self.event.wait()
+    
+    def notify(self):
+        self.event.set()
+
+_default_waiter_class = _ThreadWaiter
 
 
 class _Transaction(object):
@@ -479,27 +479,26 @@ class _BaseTransaction(_Transaction):
         with _global_lock:
             for item in self.values_to_check_for_cleanliness():
                 item._check_clean(self)
-            # Nope, none of them have changed. So now we create an event,
+            # Nope, none of them have changed. So now we create a waiter,
             # then add it to all of the vars we've read.
-            e = _Event()
+            w = _default_waiter_class(self.resume_at)
             for item in self.read_set:
-                item._add_retry_event(e)
+                item._waiters.add(w)
         # Then we create a timer to let us know when our retry timeout (if any
         # calls made during this transaction indicated one) is up. Note that
         # _Timer does nothing when given a resume time of None, so we don't
         # need to worry about that here.
-        timer = _Timer(e, self.resume_at)
-        timer.start()
+        # TODO: Update the above comment
         # Then we wait.
-        e.wait()
+        w.wait()
         # One of the vars was modified or our timeout expired. Now we go cancel
         # the timer (in case it was a change to one of our watched vars that
         # woke us up instead of a timeout) and remove ourselves from the vars'
         # events.
-        timer.cancel()
+        # TODO: Update the above comment
         with _global_lock:
             for item in self.read_set:
-                item._remove_retry_event(e)
+                item._waiters.discard(w)
         # Then we compute the current_start_time the next transaction attempt
         # should see. If we didn't have a resume_at specified (i.e. we blocked
         # solely on changes to TVars etc. we'd read), we use the current time;
@@ -621,7 +620,7 @@ class TVar(object):
     More complex datatypes (such as TList, TDict, and TObject) are available in
     stm.datatypes.
     """
-    __slots__ = ["_events", "_real_value", "_modified", "_watchers",
+    __slots__ = ["_waiters", "_real_value", "_modified", "_watchers",
                  "__weakref__"]
     
     def __init__(self, value=None):
@@ -629,9 +628,9 @@ class TVar(object):
         Create a TVar with the specified initial value.
         """
         # TODO: Sets are expensive things (~232 bytes), much more expensive
-        # than TVars (~88 bytes). We should set self._events and self._watchers
+        # than TVars (~88 bytes). We should set self._waiters and self._watchers
         # to None whenever they don't contain anything to save on space.
-        self._events = set()
+        self._waiters = set()
         self._real_value = value
         self._modified = 0
         # Set of _Watcher objects that accessed this TVar during their last
@@ -667,19 +666,13 @@ class TVar(object):
             # It has, so restart the transaction.
             raise _Restart
     
-    def _add_retry_event(self, e):
-        self._events.add(e)
-    
-    def _remove_retry_event(self, e):
-        self._events.remove(e)
-    
     def _update_real_value(self, value):
         # NOTE: This is always called while the global lock is acquired
         # Update our real value.
         self._real_value = value
         # Then notify all of the events registered to us.
-        for e in self._events:
-            e.set()
+        for w in self._waiters:
+            w.notify()
 
 
 class TWeakRef(object):
@@ -712,10 +705,10 @@ class TWeakRef(object):
         """
         Create a new weak reference pointing to the specified value.
         """
-        # TODO: Same note as on TVar._events about replacing the sets with None
+        # TODO: Same note as on TVar._waiters about replacing the sets with None
         # when they don't contain anything. We should also consider setting a
         # __slots__ on TWeakRef.
-        self._events = set()
+        self._waiters = set()
         self._mature = False
         self._weak_ref = weakref_module.ref(value, self._on_value_dead)
         self._strong_ref = value
@@ -828,8 +821,8 @@ class TWeakRef(object):
         """
         def run():
             with _global_lock:
-                for e in self._events:
-                    e.set()
+                for w in self._waiters:
+                    w.notify()
             # Re-run all of our watchers. We do this by running a transaction
             # whose sole action is to add us to its modified set. We
             # catch any exceptions that occur and print out a message telling
@@ -858,12 +851,6 @@ class TWeakRef(object):
             if self._callback is not None:
                 atomically(self._callback)
         _Thread(name="%r dead value notifier" % self, target=run).start()
-    
-    def _add_retry_event(self, e):
-        self._events.add(e)
-    
-    def _remove_retry_event(self, e):
-        self._events.remove(e)
 
 
 def atomically(function):
