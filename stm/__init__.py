@@ -139,8 +139,46 @@ class _ThreadWaiter(_Thread):
     
     def notify(self):
         self.event.set()
+    
+    def __str__(self):
+        if self.event.is_set():
+            return "<_ThreadWaiter done waiting>"
+        else:
+            return "<_ThreadWaiter notifying at {0}>".format(self.resume_at)
+    
+    __repr__ = __str__
 
 _default_waiter_class = _ThreadWaiter
+
+
+class _ElapsedWatcherNotifier(_Thread):
+    def __init__(self, watcher, waiter):
+        _Thread.__init__(self)
+        self.watcher = watcher
+        self.waiter = waiter
+        # Compatibility with Transaction.modified_set
+        self._watchers = set([watcher])
+    
+    # Also for compatibility with Transaction.modified_set
+    def _check_clean(self, transaction):
+        pass
+    
+    def run(self):
+        self.waiter.wait()
+        with _global_lock:
+            if self.watcher.notifier_thread is not self:
+                return
+            self.watcher.notifier_thread = None
+            self.watcher.notifier_waiter = None
+        @atomically
+        def _():
+            _stm_state.get_current().modified_set.add(self)
+    
+    def __str__(self):
+        return "<_ElapsedWatcherNotifier waiting on {0} notifying {1}".format(
+            self.waiter, self.watcher)
+    
+    __repr__ = __str__
 
 
 class _Transaction(object):
@@ -157,6 +195,9 @@ class _Transaction(object):
         self.watchers_cache = {}
         # Maps watchers to vars they read during their last run
         self.watched_vars_cache = {}
+        # Maps watchers to the resume_at indicated in their transaction, or
+        # None if they didn't make a call to elapsed() that returned False
+        self.resume_watchers_at_cache = {}
         # Vars that were read before they were written, or never written (i.e.
         # not vars that were written first). These are the vars for which
         # load_real_value was called. This set also includes mature TWeakRefs
@@ -178,6 +219,7 @@ class _Transaction(object):
         # Sets of watchers whose watched_vars have been read/written
         self.watched_vars_changed_set = set()
         self.proposed_watchers = []
+        self.resume_at = None
     
     def values_to_check_for_cleanliness(self):
         return (self.read_set | self.write_set | self.modified_set |
@@ -281,6 +323,19 @@ class _Transaction(object):
     def set_watched_vars(self, watcher, vars):
         self.watched_vars_changed_set.add(watcher)
         self.watched_vars_cache[watcher] = vars
+    
+    def update_resume_at(self, resume_at):
+        if self.resume_at is None:
+            # First timed retry request of the transaction, so just store its
+            # requested resume time.
+            self.resume_at = resume_at
+        else:
+            # Second or later timed retry request of this transaction (the
+            # previous ones were presumably intercepted by or_else), so see
+            # which one wants us to resume sooner and resume then.
+            self.resume_at = min(self.resume_at, resume_at)
+        if self.parent:
+            self.parent.update_resume_at(resume_at)
     
     def make_previously(self):
         """
@@ -409,6 +464,9 @@ class _BaseTransaction(_Transaction):
                     self.set_watchers(formerly_watched_var, self.get_watchers(formerly_watched_var) - set([watcher]))
                 for newly_watched_var in newly_watched_vars - formerly_watched_vars:
                     self.set_watchers(newly_watched_var, self.get_watchers(newly_watched_var) | set([watcher]))
+                # Then store off the time at which the watcher should be
+                # automatically resumed if it called elapsed()
+                self.resume_watchers_at_cache[watcher] = watcher_transaction.resume_at
                 # Now we run the callback in its own transaction.
                 callback_transaction = _NestedTransaction(self)
                 with _stm_state.with_current(callback_transaction):
@@ -458,6 +516,15 @@ class _BaseTransaction(_Transaction):
                 watcher.watched_vars.intersection_update(self.get_watched_vars(watcher))
                 watcher.watched_vars.update(self.get_watched_vars(watcher))
                 watcher._modified = modified
+                # We also cancel the watcher's elapsed notifier, if any, and
+                # then schedule a new one if the watcher called elapsed()
+                if watcher.notifier_waiter:
+                    watcher.notifier_thread = None
+                    watcher.notifier_waiter.notify()
+                if self.resume_watchers_at_cache[watcher] is not None:
+                    watcher.notifier_waiter = _default_waiter_class(self.resume_watchers_at_cache[watcher])
+                    watcher.notifier_thread = _ElapsedWatcherNotifier(watcher, watcher.notifier_waiter)
+                    watcher.notifier_thread.start()
             # Then we tell all TWeakRefs created during this transaction to
             # mature, and we're done!
             for ref in self.created_weakrefs:
@@ -514,17 +581,6 @@ class _BaseTransaction(_Transaction):
     
     def make_previously(self):
         return _BaseTransaction(self.overall_start_time, self.current_start_time, self.start)
-    
-    def update_resume_at(self, resume_at):
-        if self.resume_at is None:
-            # First timed retry request of the transaction, so just store its
-            # requested resume time.
-            self.resume_at = resume_at
-        else:
-            # Second or later timed retry request of this transaction (the
-            # previous ones were presumably intercepted by or_else), so see
-            # which one wants us to resume sooner and resume then.
-            self.resume_at = min(self.resume_at, resume_at)
 
 
 class _NestedTransaction(_Transaction):
@@ -573,6 +629,7 @@ class _NestedTransaction(_Transaction):
             self.parent.set_watchers(var, self.get_watchers(var))
         for watcher in self.watched_vars_changed_set:
             self.parent.set_watched_vars(watcher, self.get_watched_vars(watcher))
+            self.parent.resume_watchers_at_cache[watcher] = self.resume_watchers_at_cache[watcher]
     
     def make_previously(self):
         return _NestedTransaction(self.parent)
@@ -603,10 +660,18 @@ class _Watcher(object):
         # function itself wouldn't have been able to access them during its
         # next run, so we don't care about them.
         self.watched_vars = _WeakSet()
+        self.notifier_waiter = None
+        self.notifier_thread = None
 
     def _check_clean(self, transaction):
         if self._modified > transaction.start:
             raise _Restart
+    
+    def __str__(self):
+        return "<_Watcher watching {0} with callback {1}>".format(
+            self.function, self.callback)
+    
+    __repr__ = __str__
 
 
 class TVar(object):
@@ -1002,9 +1067,12 @@ def elapsed(seconds=None, time=None):
         # We have, so just return True.
         return True
     else:
-        # We haven't, so let our base transaction know that we need to wake up
+        # We haven't, so let our current transaction know that we need to wake up
         # and re-run this transaction at the specified time, then return False.
-        _stm_state.get_base().update_resume_at(time)
+        # Note that _NestedTransaction's implementation of update_resume_at
+        # will take care of trickling down to the transaction's parent, so the
+        # base transaction will be duly notified.
+        _stm_state.get_current().update_resume_at(time)
         return False
 
 
