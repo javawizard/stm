@@ -1,0 +1,129 @@
+So I'd been going with the conceptual model of stm.elapsed essentially being a read-and-compare of a TVar whose value is continuously set by an infinite loop in an external thread to time.time(), but obviously without the performance hit.
+
+And I just realized a problem where the current implementation doesn't match up with that conceptual model: watches.
+
+Under that model, a watch that calls elapsed would be scheduled to be re-run as soon as the time that it checked for was up; elapsed()'s result would be different, so the watch would be checked and run on the thread that handles updating this global TVar's value to be time.time(). That doesn't happen with the current implementation.
+
+And it'd be really nice (not to mention correct) to support such a thing. It could be used to, for example, schedule tasks to run in the future:
+
+    @stm.atomically_watch(lambda: elapsed(time=...))
+    @stm.utils.changes_only
+    def _(should_run):
+        if should_run:
+            ...do something...
+
+My main use case that got me thinking about this was reconnect loops in Zelden protocol implementations. Variables could be held that indicate things like the time at which the last connection attempt was made, the number of connection attempts that have been made thus far (to allow for exponential backoff in the speed with which we attempt to reconnect), and so on, and then we could place a watch that indicates whether time's up for another retry and have the callback initiate one. And it wouldn't require us to manually create or schedule any threads.
+
+(Actually, if we implement this right, it'd break the above conceptual model in one very good way, which is that a call to elapsed() that ends up returning True wouldn't cause the watcher to be run again in the future, and particularly wouldn't cause a reference to the watcher to be held by the machinery responsible for running watchers that read from elapsed().)
+
+So, how would it work?
+
+We'd need to involve threads at some level to run watchers in the future.
+
+And I'm ok with watchers that read from elapsed() performing fairly badly at present, so I'm fine if they spawn a thread each to wait and re-run them when necessary. I would like to change that at some point in the future, but I can handle it for now.
+
+So actually, I think I'll digress for a moment to talk about timeouts in ordinary transactions.
+
+I've been thinking more about how to do away with having to spawn a separate thread, and I think I've decided on an abstract class that looks something like:
+
+Waiter
+    __init__(time_at_which_to_resume)
+    wait() # Wait until notify() or time_at_which_to_resume happens
+    notify() # Wake up a call to wait()
+
+Note that wait() could only be called once; calling it a second time would result in undefined and implementation specific behavior.
+
+Also note that wait() would just return immediately if notify() had already been called.
+
+So then we'd have a default implementation that just uses a separate thread like we're doing now. It would create a threading.Event and spawn a _Timer set to call notify(). Then wait() would just wait on the event and notify would notify the event and then cancel the timer, and that'd be it.
+
+Then we'd have an implementation that creates a pipe and stores off the read and write ends. notify() would write a byte to the write end of the pipe, and wait() would use select.select() to wait on the read end of the pipe with the timeout specified.
+
+And we could even have a third implementation that uses threading.Event's timeout parameter. I seem to recall reading that they fixed it in a more recent Python 3.x to actually pass the timeout onto pthread_mutex_timedlock/pthread_cond_timedwait, so we could use that on such versions of Python. (The lack of native support for timeouts like this is the whole reason why all of these other Waiter subclasses exist.)
+
+Then we'd have a global variable like _default_waiter that we assign to the particular waiter implementation best suited for the current platform. For now that'd just use the pipe/select one on Unix-based platforms and the thread-based one on all other platforms.
+
+Then we'd need to have TVars/TWeakRefs accept functions to be called instead of events to be notified, which should be a simple change.
+
+Then we'd have _BaseTransaction.retry_block create a Waiter, add its notify method to the TVars we read during the transaction, then wait on the waiter, then remove the notify methods, then raise _Restart as we currently do.
+
+
+
+That sounds good.
+
+So, back to elapsed().
+
+So, each watcher would have an associated thread and waiter. The thread would be started by the last transaction to run (and therefore modify) the watcher, and it would wait on a newly-created waiter set to expire at the time when the watcher's result would have changed.
+
+Oh, NOTE: This whole thing means that we'd probably need to have nested transaction have an update_resume_at that sets the resume_at on self and then calls self.parent.update_resume_at. We'd basically need each transaction, both base and nested, to keep track of when the things that it's run want it to resume so that we can see when we need to re-run a given watcher.
+
+So, watchers have a thread and a waiter. Or rather, they can, but they wouldn't when all of their calls to elapsed() returned True on their last run.
+
+So, just to remind myself, it's supposed to be perfectly acceptable for a watcher to be run multiple superfluous times, and callbacks are expected to handle such situations.
+
+So, during our executions of a watcher just before committing (I'll get to the changes we'll need to this part in a minute), we figure out the time at which we need to re-run the watcher.
+
+Then, once we have the lock and while we're actually committing, we see if the watcher currently has a thread and waiter waiting to run it. If it does, we notify the waiter.
+
+Then we create a new waiter set to wake up at the specified time, and then we create a new thread wrapping that waiter and add it and the waiter to the watcher. And then, of course, we update the watcher's version clock to indicate that it was modified.
+
+So then the behavior of the thread is a bit more complicated.
+
+The first thing it does is waits on the waiter.
+
+Then, as an optimization, after it wakes up it obtains the lock and checks to see if the watcher's thread is still self, and if it isn't, then it just returns under the presumption that the watcher has been re-run (perhaps we were woken up by a call to notify() instead of by the timeout elapsing) and has a new timeout thread or doesn't have one at all.
+
+Then... What do we do then?
+
+Well, I think basically all we have to do is re-run the watcher...
+
+Hm, interesting realization: re-running later on a timeout set with elapsed(seconds=...) is pointless, since when we run again we'll be in a new transaction, so that many seconds won't have passed anymore. What should we do?
+
+One option would be to forbid elapsed(seconds=...) inside a transaction, or even split out elapsed into twp separate functions, elapsed (for seconds) and occurred (for time). I'm not a big fan at the moment.
+
+I think for now I'll just not worry about it and mention in elapsed's and watch's dostring that the semantics of using elapsed(seconds=...) inside a watch are really weird at the moment and so just don't do it. Then I'll worry about exactly what to do later.
+
+(This does make me think that maybe we should only have elapsed(time=...) due to the number of problems I'm finding with elapsed(seconds=...) in general, but that would make life rather less convenient in a lot of ways, so the jury's still out on that one.)
+
+So, we just need to re-run the watcher. I'm thinking I'll have a dummy object representing an expired timeout that I can stick into the transaction's modified_set to get it to re-run the watcher that we timed out on.
+
+So yeah, I think that's about it.
+
+And you know what, it occurs to me... I think if I had transactions track two separate variables, one for the time to resume as per seconds=... and one for the time to resume as per time=..., then we could just ignore the seconds=... one and only take interest in the time=... one as far as running watches later goes. I /think/ that would solve the problem.
+
+But I'll worry about that bit later. First the _Waiter class.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
