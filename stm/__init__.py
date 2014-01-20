@@ -21,6 +21,9 @@ except ImportError: # 2.6 or earlier
 from contextlib import contextmanager
 import time as time_module
 import traceback
+import os
+import select
+import platform
 
 __all__ = ["TVar", "TWeakRef", "atomically", "retry", "or_else", "invariant",
            "previously", "watch", "elapsed"]
@@ -148,7 +151,38 @@ class _ThreadWaiter(_Thread):
     
     __repr__ = __str__
 
-_default_waiter_class = _ThreadWaiter
+
+class _PipeWaiter(object):
+    def __init__(self, resume_at):
+        self.resume_at = resume_at
+        r, w = os.pipe()
+        self.reader = os.fdopen(r)
+        self.writer = os.fdopen(w, "w")
+    
+    def wait(self):
+        delay = self.resume_at - time_module.time()
+        if delay <= 0: # resume_at has already happened
+            return
+        try:
+            select.select([self.reader], [], [], delay)
+        except:
+            pass
+    
+    def notify(self):
+        # TODO: Make sure the pipe's not full
+        try:
+            self.writer.write(" ")
+            self.writer.flush()
+        except:
+            pass
+
+
+if platform.system() == "Linux":
+    # TODO: Test _PipeWaiter on other Unix-like OSs (it /should/ work on all of
+    # them) and add them here
+    _default_waiter_class = _PipeWaiter
+else:
+    _default_waiter_class = _ThreadWaiter
 
 
 class _ElapsedWatcherNotifier(_Thread):
