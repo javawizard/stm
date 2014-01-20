@@ -220,6 +220,7 @@ class _Transaction(object):
         self.watched_vars_changed_set = set()
         self.proposed_watchers = []
         self.resume_at = None
+        self.watcher_resume_at = None
     
     def values_to_check_for_cleanliness(self):
         return (self.read_set | self.write_set | self.modified_set |
@@ -336,7 +337,15 @@ class _Transaction(object):
             self.resume_at = min(self.resume_at, resume_at)
         if self.parent:
             self.parent.update_resume_at(resume_at)
-    
+
+    def update_watcher_resume_at(self, watcher_resume_at):
+        if self.watcher_resume_at is None:
+            self.watcher_resume_at = watcher_resume_at
+        else:
+            self.watcher_resume_at = min(self.watcher_resume_at, watcher_resume_at)
+        if self.parent:
+            self.parent.update_watcher_resume_at(watcher_resume_at)    
+
     def make_previously(self):
         """
         Returns a new transaction reflecting the state of this transaction
@@ -373,7 +382,6 @@ class _BaseTransaction(_Transaction):
         self.next_start_time = current_start_time
         self.created_weakrefs = set()
         self.live_weakrefs = set()
-        self.resume_at = None
         # Store off the transaction id we're starting at, so that we know if
         # things have changed since we started.
         if not start:
@@ -466,7 +474,7 @@ class _BaseTransaction(_Transaction):
                     self.set_watchers(newly_watched_var, self.get_watchers(newly_watched_var) | set([watcher]))
                 # Then store off the time at which the watcher should be
                 # automatically resumed if it called elapsed()
-                self.resume_watchers_at_cache[watcher] = watcher_transaction.resume_at
+                self.resume_watchers_at_cache[watcher] = watcher_transaction.watcher_resume_at
                 # Now we run the callback in its own transaction.
                 callback_transaction = _NestedTransaction(self)
                 with _stm_state.with_current(callback_transaction):
@@ -1073,6 +1081,8 @@ def elapsed(seconds=None, time=None):
         # will take care of trickling down to the transaction's parent, so the
         # base transaction will be duly notified.
         _stm_state.get_current().update_resume_at(time)
+        if seconds is None:
+            _stm_state.get_current().update_watcher_resume_at(time)
         return False
 
 
@@ -1161,6 +1171,8 @@ def previously(function, toplevel=False):
             current.read_set.update(transaction.read_set)
             if transaction.resume_at is not None:
                 current.update_resume_at(transaction.resume_at)
+            if transaction.watcher_resume_at is not None:
+                current.update_watcher_resume_at(transaction.watcher_resume_at)
         # If it's a nested transaction, it will have already modified our base
         # by virtue of using our base as its parent, so we don't need to do
         # anything else.
