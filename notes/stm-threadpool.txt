@@ -51,3 +51,7 @@ I think I'll try that and see how it goes.
 Oh, and, I don't think thread spawning needs to change, except that the watcher that pops a task and a thread and hands the task to the thread to run would also be responsible for decrementing the number of free threads, and the transaction that puts the thread back into the queue of free threads would also mark the thread as free. And, in fact, were I to give broadcast endpoints the ability to tell the user how many items they had on them, we wouldn't even need to track this number as we could just ask the free thread endpoint how many free threads it has.
 
 In fact, that enhancement to BroadcastEndpoint sounds rather lovely. I think I'm going to go write it.
+
+So that's done. Now for the modifications to ThreadPool.
+
+
