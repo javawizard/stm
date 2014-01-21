@@ -33,3 +33,6 @@ So that happened and things work great, but now I've run into another issue, thi
 (And, in fact, because I'm subclassing ThreadPool from TObject, this also happens whenever any of the threadpool's attributes change, as for all the threads know they could have a new list in self._tasks to look at. I'm actually tempted to change TObject to use a TDict of TVars for that very reason; were I to do that, checks of things watching attributes on a TObject subclass would only be triggered when a new attribute was created, not when an existing one's value changed.)
 
 Actually, I think I'm going to go make that change to TObject and see how that affects performance first before trying to solve the other problem.
+
+Excellent, that had a huge performance increase: overall number of retries went from around 10,000 to just over 1000.
+

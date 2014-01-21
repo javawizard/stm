@@ -337,10 +337,13 @@ class TObject(object):
     def __getattr__(self, name):
         if name == "_tobject_dict":
             return object.__getattribute__(self, name)
-        return self._tobject_dict[name]
+        return self._tobject_dict[name].get()
     
     def __setattr__(self, name, value):
-        self._tobject_dict[name] = value
+        try:
+            self._tobject_dict[name].set(value)
+        except KeyError:
+            self._tobject_dict[name] = stm.TVar(value)
     
     def __delattr__(self, name):
         del self._tobject_dict[name]
