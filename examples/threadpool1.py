@@ -15,7 +15,7 @@ def _((scheduled, finished, live, free, tasks)):
     print "{0} scheduled, {1} finished, {2} threads live, {3} free, {4} tasks scheduled".format(scheduled, finished, live, free, tasks)
 
 def task():
-    time.sleep(10 + random.random() * 5)
+    time.sleep(0.5)
 
 for _ in range(400):
     pool.schedule(task)
