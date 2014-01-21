@@ -25,3 +25,11 @@ That also allows us to simplify the code that the workers actually run. I made i
 So yeah, I think I'm going to convert the existing ThreadPool to use this approach first, before I worry about making it conform to concurrent.futures.Executor.
 
 (Oh, also, the watch thing means that, if a new task slips into the task list between a worker marking itself as free and marking itself as no longer free, an additional thread will be spun up by the worker marking itself as no longer free to handle the task.)
+
+
+
+So that happened and things work great, but now I've run into another issue, this one performance related: when a pool has a huge number of threads, any one of them taking a task to run causes all of the other idle ones to rescan the list of tasks to run and retry. This results in quadratic performance, which is bad. The current incarnation of examples/threadpool1.py demonstrates this quite nicely (run it with PYTHON_STM_STATS=1 to see this).
+
+(And, in fact, because I'm subclassing ThreadPool from TObject, this also happens whenever any of the threadpool's attributes change, as for all the threads know they could have a new list in self._tasks to look at. I'm actually tempted to change TObject to use a TDict of TVars for that very reason; were I to do that, checks of things watching attributes on a TObject subclass would only be triggered when a new attribute was created, not when an existing one's value changed.)
+
+Actually, I think I'm going to go make that change to TObject and see how that affects performance first before trying to solve the other problem.
