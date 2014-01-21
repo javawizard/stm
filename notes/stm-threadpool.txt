@@ -36,3 +36,18 @@ Actually, I think I'm going to go make that change to TObject and see how that a
 
 Excellent, that had a huge performance increase: overall number of retries went from around 10,000 to just over 1000.
 
+So that only works with performance that's that good if the pool is saturated. Otherwise an exorbitant number of retries still happen, as I mentioned above, because when one thread pulls an item off of the list to consume, all of the other threads waiting for items have to wake up, see that there aren't any items available for them, and go back to retrying.
+
+So, I think I have an idea of how this could be fixed: instead of having a list from which threads pull tasks to work on, we have each thread (and note that I'd have to promote these worker threads to have their own class) have a field storing the task currently being run by that thread. We also have the threadpool track a queue of threads waiting for work to do.
+
+Then we have a watcher that watches a boolean indicating whether there are any tasks that need running and whether there are any free threads on the queue. When there are tasks to run and threads to run them, the callback runs in a loop until there are no more tasks to process or no more threads to process them with. For each task, it pulls a thread off of the queue and sets the thread's current task to the task to run, and that's it.
+
+Then each thread simply retries on its own personal task that it's supposed to be running. When it finally gets a task, it runs it, then puts itself back into the queue of threads that need work. That way, each thread only resumes from retrying when a task has been assigned to it specifically.
+
+I think I'll try that and see how it goes.
+
+(And a note: when I change this whole thing to be compatible with ThreadPoolExecutor, tasks will carry a future to notify of their result along with them, which will mean that threads will need to have a current future into which the result should be placed as well. Either that or I could have a wrapper around ThreadPool that supports futures by wrapping tasks with a function that sticks the result onto the future, but then future results and stats about how many tasks have been completed as offered by the thread pool wouldn't be in sync, and having them in sync might be nice.)
+
+Oh, and, I don't think thread spawning needs to change, except that the watcher that pops a task and a thread and hands the task to the thread to run would also be responsible for decrementing the number of free threads, and the transaction that puts the thread back into the queue of free threads would also mark the thread as free. And, in fact, were I to give broadcast endpoints the ability to tell the user how many items they had on them, we wouldn't even need to track this number as we could just ask the free thread endpoint how many free threads it has.
+
+In fact, that enhancement to BroadcastEndpoint sounds rather lovely. I think I'm going to go write it.
