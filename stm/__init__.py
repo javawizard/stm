@@ -160,9 +160,12 @@ class _PipeWaiter(object):
         self.writer = os.fdopen(w, "w")
     
     def wait(self):
-        delay = self.resume_at - time_module.time()
-        if delay <= 0: # resume_at has already happened
-            return
+        if self.resume_at is None:
+            delay = None
+        else:
+            delay = self.resume_at - time_module.time()
+            if delay <= 0: # resume_at has already happened
+                return
         try:
             select.select([self.reader], [], [], delay)
         except:
