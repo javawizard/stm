@@ -298,7 +298,7 @@ class TDict(MutableMapping):
         return TValueIterator(self.var.get(), lambda e: e.key)
     
     def __len__(self):
-        self.var.get().annotation.index
+        return self.var.get().annotation.index
     
     def iterkeys(self):
         return iter(self)
