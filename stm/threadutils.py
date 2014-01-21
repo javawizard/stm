@@ -110,10 +110,12 @@ class ThreadPool(stm.datatypes.TObject):
             self._max_threads = max_threads
             self._keep_alive = keep_alive
             self._live_threads = 0
-            self._free_threads = 0
             self._tasks_scheduled = 0
             self._tasks_finished = 0
+            # Hack until I write a proper TSet datatype
+            self._free_threads = stm.datatypes.TDict()
             stm.watch(self._calculate_threads_short, self._spin_up_threads)
+            stm.watch(self._check_tasks_ready, self._allocate_tasks)
     
     def _calculate_threads_short(self):
         """
@@ -121,7 +123,7 @@ class ThreadPool(stm.datatypes.TObject):
         up given our current circumstances in order to have one free thread for
         every scheduled task without going over the limit.
         """
-        return min(len(self._tasks) - self._free_threads, self._max_threads - self._live_threads)
+        return min(len(self._tasks) - len(self._free_threads), self._max_threads - self._live_threads)
     
     @stm.utils.changes_only(according_to=operator.eq)
     def _spin_up_threads(self, number_of_threads):
@@ -130,8 +132,26 @@ class ThreadPool(stm.datatypes.TObject):
         """
         for _ in range(number_of_threads):
             self._live_threads += 1
-            self._free_threads += 1
-            Thread(target=self._worker_run).start()
+            thread = _ThreadPoolWorker(self)
+            thread.start()
+            self._free_threads[thread] = None
+    
+    def _check_tasks_ready(self):
+        """
+        See if we have both tasks to run and free threads to run them.
+        """
+        return bool(self._tasks) and bool(self._free_threads)
+    
+    @stm.utils.changes_only(according_to=operator.eq)
+    def _allocate_tasks(self, _):
+        """
+        Pop pairs of tasks to be allocated and free threads to allocate them to
+        and tell each of the threads to run each of the tasks.
+        """
+        while self._check_tasks_ready():
+            task = self._tasks.pop()
+            thread = self._free_threads.popitem()[0]
+            thread.current_task = task
     
     @stm.utils.atomic_function
     def schedule(self, function):
@@ -167,23 +187,37 @@ class ThreadPool(stm.datatypes.TObject):
     @property
     def tasks_remaining(self):
         return self._tasks_scheduled - self._tasks_finished
+
+
+class _ThreadPoolWorker(Thread):
+    # NOTE: We depend on the fact that Thread subclasses TObject. Might be a
+    # better idea to explicitly subclass TObject ourselves, init it, and then
+    # have TObject watch for the case where its __init__ is called twice.
+    # (Or I could use super(), but I'm on an anti-super kick right now due to
+    # the fact that object.__init__ gets mad if you give it any arguments...)
+    def __init__(self, pool):
+        Thread.__init__(self)
+        self.pool = pool
+        self.current_task = None
     
-    def _worker_run(self):
+    def run(self):
         while True:
             @stm.atomically
             def task():
                 # See if we have any tasks to run.
-                if self._tasks:
+                if self.current_task:
                     # We do. Mark ourselves as no longer free.
-                    self._free_threads -= 1
-                    return self._tasks.pop()
+                    return self.current_task
                 # No tasks yet, so see if we've been idle for more than
                 # self._keep_alive seconds.
-                if stm.elapsed(self._keep_alive):
+                if stm.elapsed(self.pool._keep_alive):
                     # We have, so decrement the number of free and live threads
                     # and then die.
-                    self._free_threads -= 1
-                    self._live_threads -= 1
+                    self.pool._live_threads -= 1
+                    # Note that we don't access _free_threads until when we're
+                    # actually going to die, so we won't ever resume from
+                    # retrying just because another thread became free.
+                    del self.pool._free_threads[self]
                     return None
                 # We haven't, so retry.
                 stm.retry()
@@ -199,8 +233,9 @@ class ThreadPool(stm.datatypes.TObject):
             # that have been completed and mark ourselves as free.
             @stm.atomically
             def _():
-                self._tasks_finished += 1
-                self._free_threads += 1
+                self.pool._tasks_finished += 1
+                self.pool._free_threads[self] = None
+                self.current_task = None
 
 
 
