@@ -420,6 +420,7 @@ class BroadcastQueue(TObject):
         """
         TObject.__init__(self)
         self._var = stm.TVar(None)
+        self._written = 0
     
     def put(self, value):
         """
@@ -429,6 +430,7 @@ class BroadcastQueue(TObject):
         item = _BroadcastItem(value, stm.TVar())
         self._var.set(item)
         self._var = item.next
+        self._written += 1
     
     def new_endpoint(self):
         """
@@ -436,7 +438,7 @@ class BroadcastQueue(TObject):
         queue. The endpoint initially starts out empty; items will appear on it
         as soon as put() is called next.
         """
-        return BroadcastEndpoint(self._var)
+        return BroadcastEndpoint(self)
 
 
 class BroadcastEndpoint(TObject):
@@ -447,9 +449,11 @@ class BroadcastEndpoint(TObject):
     instance's new_endpoint() method should be called to obtain an endpoint
     that reads from the queue in question.
     """
-    def __init__(self, var):
+    def __init__(self, queue):
         TObject.__init__(self)
-        self._var = var
+        self._queue = queue
+        self._var = queue._var
+        self._read = queue._written
     
     def get(self, block=True, timeout=None):
         """
@@ -471,6 +475,7 @@ class BroadcastEndpoint(TObject):
         else:
             item = self._var.get()
             self._var = item.next
+            self._read += 1
             return item.value
     
     def replace(self, value):
@@ -488,6 +493,7 @@ class BroadcastEndpoint(TObject):
         """
         item = _BroadcastItem(value, self._var)
         self._var = stm.TVar(item)
+        self._read -= 1
     
     def peek(self, block=False, timeout=None):
         """
@@ -521,6 +527,14 @@ class BroadcastEndpoint(TObject):
         created endpoint.
         """
         return BroadcastEndpoint(self._var)
+    
+    @property
+    def remaining(self):
+        """
+        The number of items remaining to be read from this endpoint. This is
+        the number of times get() could be called without retrying.
+        """
+        return self._queue._written - self._read
     
     def __copy__(self):
         """
