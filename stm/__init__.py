@@ -24,6 +24,8 @@ import traceback
 import os
 import select
 import platform
+import collections
+import atexit
 
 __all__ = ["TVar", "TWeakRef", "atomically", "retry", "or_else", "invariant",
            "previously", "watch", "elapsed"]
@@ -86,6 +88,25 @@ _global_lock = _Lock()
 # run will change this to the number 1, the second transaction to the number
 # 2, and so on.
 _last_transaction = 0
+# Number of transaction attempts that have started so far
+_attempts_started = 0
+# Number of transaction attempts that have concluded, whatever the result
+_attempts_concluded = 0
+# Number of transaction attempts that concluded by restarting
+_attempts_restarted = 0
+# Number of transaction attempts that concluded by retrying
+_attempts_retried = 0
+# Number of transaction attempts that concluded with an exception being raised
+_attempts_aborted = 0
+# Deque of threading.Event objects of attempts waiting to proceed
+_attempt_waitlist = collections.deque()
+# There's very little point in setting this to more than 1 on CPython, but if
+# we don't have this set to at least 2, then restarts will never be tested.
+# This should also be set to the number of cores present on the machine when
+# using Jython or anything without a GIL.
+# I'm also thinking about ways to have this disabled by default and only enable
+# it if a large amount of restarts start happening.
+_max_parallel_attempts = 2
 
 
 class _ThreadWaiter(_Thread):
@@ -419,16 +440,10 @@ class _BaseTransaction(_Transaction):
         self.next_start_time = current_start_time
         self.created_weakrefs = set()
         self.live_weakrefs = set()
-        # Store off the transaction id we're starting at, so that we know if
-        # things have changed since we started.
-        if not start:
-            # TODO: Do we need to lock here? Probably, because if we're running
-            # on, say, Jython and we don't, we might see a slightly outdated
-            # value here... But I need to think about that and make sure that
-            # that could really screw up the STM system that badly as opposed
-            # to, say, just causing a transaction to be needlessly re-run.
-            with _global_lock:
-                start = _last_transaction
+        self.retry_waiter = None
+        # If start wasn't specified (it only ever will be when we're running a
+        # previously() transaction), just leave it as None; we'll take care of
+        # actually looking at _last_transaction in self.run().
         self.start = start
     
     def get_base_transaction(self):
@@ -455,15 +470,74 @@ class _BaseTransaction(_Transaction):
             return set(watcher.watched_vars)
     
     def run(self, function):
+        global _attempts_started
+        global _attempts_concluded
+        global _attempts_restarted
+        global _attempts_retried
+        global _attempts_aborted
+        global _attempt_waitlist
+        # NOTE: This is only (and must only be) called when actually running
+        # a transaction; previously() has its own logic that it uses.
         try:
-            # First we actually run the transaction.
-            result = function()
-            # Transaction appears to have run successfully, so commit it.
-            self.commit()
-            # And we're done!
-            return result
+            restarted = False
+            retried = False
+            aborted = False
+            try:
+                event = None
+                # This block won't raise an exception. If it does, we've got major
+                # internal issues, and we're fine with the STM system being horked.
+                with _global_lock:
+                    if _attempts_started - _attempts_concluded >= _max_parallel_attempts:
+                        event = _Event()
+                        _attempt_waitlist.append(event)
+                    else:
+                        _attempts_started += 1
+                if event:
+                    event.wait()
+                # The thread setting the event will take care of incrementing
+                # _attempts_started for us, so we don't need to worry about doing
+                # that.
+                if not self.start:
+                    # TODO: Do we need to lock here? Probably, because if we're running
+                    # on, say, Jython and we don't, we might see a slightly outdated
+                    # value here... But I need to think about that and make sure that
+                    # that could really screw up the STM system that badly as opposed
+                    # to, say, just causing a transaction to be needlessly re-run.
+                    with _global_lock:
+                        self.start = _last_transaction
+                # First we actually run the transaction.
+                result = function()
+                # Transaction appears to have run successfully, so commit it.
+                self.commit()
+                # And we're done!
+                return result
+            except _Restart:
+                restarted = True
+                raise
+            except _Retry:
+                # The transaction called retry(). Handle accordingly.
+                retried = True
+                self.retry_setup()
+                raise
+            except:
+                aborted = True
+                raise
+            finally:
+                with _global_lock:
+                    _attempts_concluded += 1
+                    if restarted:
+                        _attempts_restarted += 1
+                    elif retried:
+                        _attempts_retried += 1
+                    elif aborted:
+                        _attempts_aborted += 1
+                    if _attempt_waitlist:
+                        event_to_set = _attempt_waitlist.popleft()
+                        event_to_set.set()
+                        # Increment the number of attempts started on behalf
+                        # of the attempt that's about to start
+                        _attempts_started += 1
         except _Retry:
-            # The transaction called retry(). Handle accordingly.
             self.retry_block()
     
     def commit(self):
@@ -575,7 +649,7 @@ class _BaseTransaction(_Transaction):
             for ref in self.created_weakrefs:
                 ref._make_mature()
     
-    def retry_block(self):
+    def retry_setup(self):
         # Received a retry request that made it all the way up to the top.
         # First, check to see if any of the variables we've accessed have
         # been modified since we started; if they have, we need to restart
@@ -596,12 +670,16 @@ class _BaseTransaction(_Transaction):
             w = _default_waiter_class(self.resume_at)
             for item in self.read_set:
                 item._waiters.add(w)
+            self.retry_waiter = w
+    
+    def retry_block(self):
         # Then we create a timer to let us know when our retry timeout (if any
         # calls made during this transaction indicated one) is up. Note that
         # _Timer does nothing when given a resume time of None, so we don't
         # need to worry about that here.
         # TODO: Update the above comment
         # Then we wait.
+        w = self.retry_waiter
         w.wait()
         # One of the vars was modified or our timeout expired. Now we go cancel
         # the timer (in case it was a change to one of our watched vars that
@@ -1270,6 +1348,21 @@ def invariant(function):
             raise Exception("Invariant %r returned an unexpected value: %r"
                             % (function, result))
     watch(wrapper, lambda _: None)
+
+
+@atexit.register
+def _():
+    with _global_lock:
+        if os.getenv("PYTHON_STM_STATS", "0").lower() in ["1", "true", "yes"]:
+            print
+            print "STM statistics:"
+            print
+            print "Total transactions:      {0}".format(_last_transaction)
+            print "Total attempts:          {0}".format(_attempts_started)
+            print "Successful attempts:     {0}".format(_attempts_concluded - (_attempts_restarted + _attempts_retried + _attempts_aborted))
+            print "Restarted attempts:      {0}".format(_attempts_restarted)
+            print "Retried attempts:        {0}".format(_attempts_retried)
+            print "Aborted attempts:        {0}".format(_attempts_aborted)
 
 
 
