@@ -1,0 +1,54 @@
+Yet another idea for an STM rewrite...
+
+Not as overarching as previous attempts, though.
+
+So I just discovered a few days ago that there's a term for the sort of thing I was thinking about to allow integration of various transactional database systems with STM: two-phase commits.
+
+Basically, such databases expose an interface with the following three functions, aside from functions used to read and write data (and start new transactions):
+
+    rollback: Undo any changes made during this transaction.
+    
+    prepare: Check to make sure that changes made as part of this transaction don't conflict with changes made as part of another, committed transaction; raise an error if conflicts are detected, put the database in a state where this transaction is now guaranteed to commit otherwise.
+    
+    commit: Commit changes made during this transaction. This must always succeed (and must not be called before a corresponding call to prepare).
+
+The idea, then, is that at commit time, all modified databases' prepare functions are called. If any of them fail, the rollback functions of all of the databases for which prepare has been called are invoked, and the transaction restarts. If none of them fail, then all of the databases' commit functions are invoked, and the transaction concludes.
+
+This, of course, offers no support for retry(). I'll worry about that later.
+
+So, the idea is that TVars act as their own little databases of sorts, with the provisio that the STM system offer them a bit of memory in which to store state. (I think this is a necessity of any database, really; most databases will want to store a reference to the particular connection being used for this particular transaction.) Reads and writes proceed as they currently do, obtaining the global lock and raising exceptions as necessary. (Transactional databases should do the same thing, namely raise an exception if queries are made whose results would be inconsistent with the results of queries already performed.) Writes would, of course, make use of transaction storage to hold the new value.
+
+Then, come commit time, the prepare function would obtain the global lock, check to make sure the TVar has not since been modified (raising an error and releasing the global lock if it has), and then return, leaving the global lock obtained. Subsequent TVars would do the same thing (note that the global lock must be reentrant in order for this to work). Then the commit function would save the changes and release the global lock.
+
+The rollback function, then, would do nothing more than release the global lock without saving any changes that had been made.
+
+And actually, that would make it remarkably easy to switch to using per-TVar locks: each TVar acquires its own lock, and then the transaction system as a whole has only to ensure that TVars are prepared and committed in an order that remains consistent across differing transactions (it could, perhaps, sort them by their Python object ids) in order for that to work and not result in deadlock.
+
+If the global lock is going to continue to be used, though, it would actually be perhaps a bit more performant to have a single "TVar database" object of sorts that's registered with the transaction when any TVars are read, and that object would have prepare and commit functions that are called only once, and thus acquire the global lock only once. That object would, then, hold a reference to each TVar and would perform validation for all of them in one fell swoop.
+
+I actually think that's probably the way I'm going to go for now.
+
+So I'm thinking I'd have a module, maybe stm.core, that has the core transaction logic and functions like atomically, retry, elapsed, or_else, invariant, watch, and previously. (Did I miss any?) Then I'll have a module (say stm.tvar) that provides TVars and their implementation of the rollback/prepare/commit interface exposed by stm.core. Then stm's __init__.py will re-export all of the "public facing" functions (atomically/retry/elapsed/or_else/invariant/watch/previously) from stm.core as well as TVar from stm.tvar.
+
+So that sounds good.
+
+So let's see... What would stm.core expose to the public other than the 7 functions listed above?
+
+Well, there'd be an abstract class representing a transactionally managed resource. It would have three abstract functions, namely rollback, prepare, and commit.
+
+Then there would be some sort of function that could be used to register a new transactionally managed resource with the current transaction. That would cause its prepare, commit, and rollback functions to be invoked as needed during the current transaction.
+
+Then there would need to be some way to access transactional memory. It could be as simple as providing a means to look up a particular transactionally managed resource given a key of some sorts.
+
+And actually, I think that'd be it.
+
+So that sounds good.
+
+I'll worry about TWeakRefs, retries, invariants, watches, and previously later.
+
+
+
+
+
+
+
