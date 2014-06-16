@@ -46,6 +46,42 @@ So that sounds good.
 
 I'll worry about TWeakRefs, retries, invariants, watches, and previously later.
 
+So... TWeakRefs...
+
+Well, for preexisting TWeakRefs...
+
+The only thing they'd need to store as part of their transactional memory would be whether the TWeakRef had been read as alive at any point during the transaction.
+
+Then commit preparation would consist solely of checking to make sure that, if the TWeakRef had been previously read as alive, it has not yet died (and raising an apprioriate exception if it has died), and that's it.
+
+And the actual commit would do nothing.
+
+Then, for TWeakRefs created during the course of the current transaction...
+
+(Note that, for such TWeakRefs, a strong reference to the ref's referent is held throughout the transaction for reasons I've explained several times before.)
+
+I think basically all that has to happen is that committing the transaction causes the strong reference to the TWeakRef's referent to be dropped.
+
+(Actually, I think that could just be done inside prepare. Then commit does nothing whatsoever.)
+
+Then retries are interesting...
+
+I think there'll have to be some sort of function, maybe listen or notify_of_changes, on the transactional resource interface that's called with a function to invoke when changes to the underlying resource are detected, and a corresponding unlisten or stop_notifying_of_changes function.
+
+Idea would be that listen would cause the passed-in function to be invoked whenever the underlying resource is modified (until a corresponding call to unlisten), or immediately if changes have happened to the resource since the transaction first began.
+
+And, in fact, since it seems at this point like a resource is a one-off object that's created afresh for each transaction, there could just be a no-arg unlisten function that removes the sole listener registered with listen (and of course a limitation would be placed that listen can be called only once for any given resource).
+
+Transactional storage would probably still need to be available to listen and unlisten.
+
+So, TVarResource (the hypothetical class that manages the entire set of TVars that have been accessed during the transaction)'s implementation would acquire the global lock, see if any of the accessed TVars have been modified since the start of the transaction (calling the listener immediately if so), and then add the listener to each of the TVar's lists of listeners to notify. Then, as part of the commit function's code that actually updates its TVars' values, it would call each of their listeners. Then unlisten would just remove the listener from the TVars' lists.
+
+I think that would work.
+
+Watches I /think/ could be implemented similarly... Perhaps they detect what resources are added to the transaction during the run of the function to watch, then somehow there's a similar function to indicate to a resource that something's interested in changes to that resource, and if such changes happen then... Hm, watchers need to be synchronously run at the end of a transaction that causes their value to change... That makes things more difficult.
+
+I'll think about that more tomorrow.
+
 
 
 
